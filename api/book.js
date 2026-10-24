@@ -3,6 +3,7 @@
 // booking and receipt written a moment earlier are removed again.
 import { clientView, newCode, newId, releaseSlot, reserveSlot, validateBooking } from "./_lib/bookings.js";
 import { handle, json, readJsonBody, requireSameOrigin } from "./_lib/http.js";
+import { rateLimit } from "./_lib/ratelimit.js";
 import { loadSettings } from "./_lib/settings.js";
 import { remove, writeFile, writeJson } from "./_lib/store.js";
 
@@ -11,6 +12,7 @@ const MAX_BODY = 470_000;
 export function POST(request) {
   return handle(request, ["POST"], async () => {
     requireSameOrigin(request);
+    await rateLimit(request, { name: "book", max: 12, windowSec: 600 }); // a real client books once or twice
     const input = await readJsonBody(request, MAX_BODY);
     const settings = await loadSettings();
     const nowMs = Date.now();
@@ -32,7 +34,7 @@ export function POST(request) {
     try {
       if (receipt) await writeFile(`proofs/${id}`, receipt.buffer, receipt.type);
       await writeJson(`bookings/${id}.json`, booking, "create");
-      await reserveSlot({ date: fields.date, time: fields.time, mins: fields.mins, id });
+      await reserveSlot({ date: fields.date, time: fields.time, mins: fields.mins, id, holdUntil: fields.holdUntil, nowMs });
     } catch (err) {
       await Promise.allSettled([
         remove(`bookings/${id}.json`),

@@ -136,7 +136,15 @@ export const STATUS = {
   rejected: { label: "Payment not received", pill: "pill-rejected" },
   done: { label: "Completed", pill: "pill-done" },
   noshow: { label: "Missed", pill: "pill-noshow" },
+  expired: { label: "Hold expired", pill: "pill-expired" },
 };
+
+// "4:30 pm", or "4:30 pm on Mon 26 Oct" when that is not today (studio time).
+export function fmtHold(epochMs, tz, nowMs = Date.now()) {
+  const time = fmtTime(fromMins(studioMinutes(epochMs, tz)));
+  const day = studioDate(epochMs, tz);
+  return day === studioDate(nowMs, tz) ? time : `${time} on ${fmtDate(day, { short: true })}`;
+}
 
 export const pill = (status) => {
   const s = STATUS[status] || STATUS.pending;

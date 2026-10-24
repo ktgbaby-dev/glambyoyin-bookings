@@ -2,7 +2,7 @@
 // POST runs an action: { action: "status" | "delete" | "settings", ... }.
 import { BlobPreconditionFailedError } from "@vercel/blob";
 import { requireOwner } from "./_lib/auth.js";
-import { releaseSlot } from "./_lib/bookings.js";
+import { releaseSlot, reserveSlot } from "./_lib/bookings.js";
 import { HttpError, ID_RE, handle, json, readJsonBody, requireSameOrigin } from "./_lib/http.js";
 import { loadSettings, saveSettings } from "./_lib/settings.js";
 import { listAll, mapLimit, readJson, remove, writeJson } from "./_lib/store.js";
@@ -42,7 +42,21 @@ async function changeStatus(body) {
     throw new HttpError(409, "bad_transition", `A ${booking.status} booking can't be marked ${next}.`);
   }
 
+  // Confirming makes the booking permanent: take (or re-take) its slot with no hold. If its hold had
+  // already run out and someone else has booked that time since, say so instead of double-booking.
+  if (next === "confirmed") {
+    try {
+      await reserveSlot({ date: booking.date, time: booking.time, mins: booking.mins, id });
+    } catch (err) {
+      if (err instanceof HttpError && err.code === "slot_taken") {
+        throw new HttpError(409, "slot_taken", "This booking's hold ran out and that time has since been booked by someone else. Message the client to agree another time.");
+      }
+      throw err;
+    }
+  }
+
   const updated = { ...booking, status: next, updatedAt: new Date().toISOString() };
+  if (next === "confirmed") delete updated.holdUntil;
   try {
     await writeJson(`bookings/${id}.json`, updated, { ifMatch: file.etag });
   } catch (err) {

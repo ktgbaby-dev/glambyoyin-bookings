@@ -631,6 +631,7 @@ p { text-wrap: pretty; }
 .pill-confirmed { background: var(--ok-bg); color: var(--ok-ink); }
 .pill-rejected { background: var(--berry); color: var(--porcelain); }
 .pill-done, .pill-noshow { background: var(--mink); color: var(--porcelain); }
+.pill-expired { background: var(--petal); color: var(--mink); }
 
 /* ---------- Your bookings ---------- */
 

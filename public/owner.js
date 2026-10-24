@@ -1,5 +1,5 @@
 // GLAM BY OYIN bookings: owner desk (mounted at /#owner).
-import { ApiError, api, bookingTitle, duration, esc, fmtDate, fmtTime, isAllDay, naira, pill, zonedToEpoch } from "./lib.js";
+import { ApiError, api, bookingTitle, duration, esc, fmtDate, fmtHold, fmtTime, isAllDay, naira, pill, zonedToEpoch } from "./lib.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -11,6 +11,7 @@ const REFRESH_MS = 60_000;
 
 const state = {
   root: null, bookings: [], settings: null, filter: "action", tab: "bookings", timer: null, proofOpen: new Set(), mounted: false,
+  skew: 0, // server clock minus this device's clock, so "expired" agrees with the server
   user: null, // the signed-in login
   accounts: false, // true once the studio has separate logins (before that: one shared password)
   users: null, // the list of logins (only for a login that manages logins)
@@ -125,6 +126,7 @@ async function refresh({ quiet = false, first = false } = {}) {
     const data = await api("/api/owner");
     state.bookings = data.bookings;
     state.settings = data.settings;
+    state.skew = data.now - Date.now();
     if (first || state.tab === "bookings") renderDesk();
     else renderNoticeOnly();
   } catch (err) {
@@ -146,11 +148,16 @@ function flash(message, isError = false) {
 const slotEpoch = (b) => zonedToEpoch(b.date, b.time, state.settings.tz);
 const isUpcoming = (b) => b.status === "confirmed" && slotEpoch(b) + b.mins * 60000 >= Date.now();
 
+// A pending booking with no receipt whose hold has run out: its slot has been released.
+const nowMs = () => Date.now() + state.skew;
+const holdExpired = (b) => b.status === "pending" && !!b.holdUntil && b.holdUntil <= nowMs();
+const shownStatus = (b) => (holdExpired(b) ? "expired" : b.status);
+
 function stats() {
   const list = state.bookings;
   const sum = (arr, key) => arr.reduce((n, b) => n + b[key], 0);
   return {
-    toCheck: list.filter((b) => b.status === "pending").length,
+    toCheck: list.filter((b) => b.status === "pending" && !holdExpired(b)).length,
     upcoming: list.filter(isUpcoming).length,
     confirmedDeposits: sum(list.filter((b) => ["confirmed", "done", "noshow"].includes(b.status)), "deposit"),
     balance: sum(list.filter((b) => b.status === "confirmed"), "balance"),
@@ -196,7 +203,7 @@ function bookingsHtml() {
   const s = stats();
   const counts = { action: s.toCheck, upcoming: s.upcoming, all: state.bookings.length };
   let list;
-  if (state.filter === "action") list = state.bookings.filter((b) => b.status === "pending").sort((a, b) => slotEpoch(a) - slotEpoch(b));
+  if (state.filter === "action") list = state.bookings.filter((b) => b.status === "pending" && !holdExpired(b)).sort((a, b) => slotEpoch(a) - slotEpoch(b));
   else if (state.filter === "upcoming") list = state.bookings.filter(isUpcoming).sort((a, b) => slotEpoch(a) - slotEpoch(b));
   else list = state.bookings;
 
@@ -239,7 +246,7 @@ function cardHtml(b) {
           <div class="bk-when">${esc(fmtDate(b.date, { short: true }))} · ${esc(fmtTime(b.time))}</div>
           <div class="bk-service">${esc(bookingTitle(b))} · ${esc(duration(b.mins))}</div>
         </div>
-        ${pill(b.status)}
+        ${pill(shownStatus(b))}
       </div>
       <dl>
         <dt>Client</dt><dd>${esc(b.name)}</dd>
@@ -250,7 +257,9 @@ function cardHtml(b) {
         <dt>Paid by</dt><dd>${esc(b.payer)}</dd>
         <dt>Code</dt><dd class="code">${esc(b.code)}</dd>
         <dt>Receipt</dt><dd>${b.hasReceipt ? "Uploaded" : "Not uploaded"}</dd>
+        ${b.status === "pending" && b.holdUntil && !holdExpired(b) ? `<dt>Held until</dt><dd>${esc(fmtHold(b.holdUntil, state.settings.tz, nowMs()))}</dd>` : ""}
       </dl>
+      ${holdExpired(b) ? `<p class="bk-note">The hold ran out without a receipt, so this slot was released. Confirm only if the client has paid. It will be booked again if it is still free.</p>` : ""}
       ${b.note ? `<p class="bk-note">${esc(b.note)}</p>` : ""}
       <div class="bk-actions">
         ${primary}${proofBtn}
@@ -378,6 +387,9 @@ function settingsHtml() {
         <legend>Deposit and bank details</legend>
         <div class="field"><label for="s-deposit">Deposit (% of the price)</label>
           <input type="number" id="s-deposit" min="0" max="100" step="1" inputmode="numeric" value="${esc(s.depositPct)}"></div>
+        <div class="field"><label for="s-hold">Hold an unpaid booking for (hours)</label>
+          <input type="number" id="s-hold" min="0" max="72" step="1" inputmode="numeric" value="${esc(s.holdHours ?? 3)}">
+          <p class="hint">A booking with no receipt keeps its slot this long, then the slot is released. A booking with a receipt is never released until you decide. 0 keeps every booking until you decide.</p></div>
         <div class="confirm-box">
           <input type="checkbox" id="s-fullpay" ${s.allowFullPayment !== false ? "checked" : ""}>
           <label for="s-fullpay">Let clients choose to pay the full price now instead of the deposit. (Shown only when the deposit is between 1% and 99%.)</label>
@@ -540,6 +552,7 @@ function readSettingsForm() {
     instagram: val("#s-instagram"),
     depositPct: Number(val("#s-deposit")),
     allowFullPayment: $("#s-fullpay", state.root).checked,
+    holdHours: Number(val("#s-hold")),
     bank: { name: val("#s-bank"), accountNumber: val("#s-acct"), accountName: val("#s-acctname") },
     policy: val("#s-policy"),
     hours,

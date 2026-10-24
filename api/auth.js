@@ -4,6 +4,7 @@ import {
   LEGACY_USER, clearedCookie, getSession, passwordMatches, recoveryConfigured, sessionCookie,
 } from "./_lib/auth.js";
 import { HttpError, handle, json, readJsonBody, requireSameOrigin, sleep } from "./_lib/http.js";
+import { rateLimit } from "./_lib/ratelimit.js";
 import { burnTime, loadUsers, normalizeUsername, publicUser, verifyPassword } from "./_lib/users.js";
 
 export function GET(request) {
@@ -16,6 +17,7 @@ export function GET(request) {
 export function POST(request) {
   return handle(request, ["POST"], async () => {
     requireSameOrigin(request);
+    await rateLimit(request, { name: "signin", max: 20, windowSec: 600 }); // on top of the delay after a wrong password
     const body = await readJsonBody(request, 2_000);
     const password = typeof body.password === "string" ? body.password : "";
     const list = await loadUsers();

@@ -1018,3 +1018,164 @@ test("the default booking policy says payment validates a booking and refunds ar
   assert.ok(DEFAULT_SETTINGS.policy.length <= 1000);
   assert.ok(!DEFAULT_SETTINGS.policy.includes("!"), "no exclamation marks");
 });
+
+// ---------- holding an unpaid booking ----------
+
+const HOUR = 3_600_000;
+// Runs fn as if `ms` had passed, for every handler that asks the clock.
+async function afterwards(ms, fn) {
+  const real = Date.now;
+  Date.now = () => real() + ms;
+  try { return await fn(); } finally { Date.now = real; }
+}
+const publicTaken = async () => (await call(pub.GET)).data.taken;
+
+test("a booking with a payment to make and no receipt holds its slot for the set hours, never past the appointment", () => {
+  const now = LOOK_NOW;
+  const book = (over = {}, settings = DEFAULT_SETTINGS) => validateBooking({ ...base(), date: "2026-10-28", time: "10:00", ...over }, settings, now).fields;
+  assert.equal(DEFAULT_SETTINGS.holdHours, 3);
+  assert.equal(book().holdUntil, now + 3 * HOUR);
+  assert.equal(book({}, { ...DEFAULT_SETTINGS, holdHours: 1 }).holdUntil, now + HOUR);
+  // a receipt means the owner decides; nothing is released automatically
+  assert.equal(book({ receipt: receipt(2000) }).holdUntil, undefined);
+  // switched off, or nothing to pay
+  assert.equal(book({}, { ...DEFAULT_SETTINGS, holdHours: 0 }).holdUntil, undefined);
+  assert.equal(book({}, { ...DEFAULT_SETTINGS, depositPct: 0 }).holdUntil, undefined);
+  // the hold stops at the start of the appointment (10:00 Lagos is 09:00 UTC on the 28th, 26 hours after "now")
+  assert.equal(book({}, { ...DEFAULT_SETTINGS, holdHours: 72 }).holdUntil, Date.UTC(2026, 9, 28, 9, 0));
+  assert.equal(book({}, { ...DEFAULT_SETTINGS, holdHours: 24 }).holdUntil, now + 24 * HOUR); // shorter than the lead time: the full hold
+});
+
+test("holdHours is validated, defaults to 3 and reaches the public page", async () => {
+  const { cleanSettings } = await import("../api/_lib/settings.js");
+  const { holdHours, ...withoutIt } = DEFAULT_SETTINGS;
+  assert.equal(cleanSettings(withoutIt).holdHours, 3); // settings saved before this existed
+  assert.equal(cleanSettings({ ...DEFAULT_SETTINGS, holdHours: 0 }).holdHours, 0);
+  for (const bad of [-1, 73, 1.5, "soon"]) assert.throws(() => cleanSettings({ ...DEFAULT_SETTINGS, holdHours: bad }), (e) => e.status === 400, String(bad));
+  assert.equal((await call(pub.GET)).data.settings.holdHours, 3);
+  const cookie = await ownerCookie();
+  const cur = (await call(owner.GET, { path: "/api/owner", cookie })).data.settings;
+  assert.equal((await ownerPost(cookie, { action: "settings", settings: { ...cur, holdHours: 6 } })).status, 200);
+  assert.equal((await call(pub.GET)).data.settings.holdHours, 6);
+});
+
+test("an unpaid booking's slot is released when its hold runs out, and someone else can take it", async () => {
+  const { date, open } = await bookable(1);
+  const a = (await bookAt(date, open, { serviceId: "soft-glam" })).data.booking;
+  assert.ok(a.holdUntil > Date.now(), "the client is told when the hold ends");
+  assert.equal(a.holdExpired, false);
+  assert.equal((await publicTaken()).filter((t) => t.date === date && t.time === open).length, 1);
+  assert.equal((await bookAt(date, open, { serviceId: "soft-glam", name: "Early Bird" })).status, 409); // still held
+
+  await afterwards(4 * HOUR, async () => {
+    assert.equal((await publicTaken()).filter((t) => t.date === date && t.time === open).length, 0, "no longer shown as taken");
+    const st = await call(status.GET, { path: `/api/status?id=${a.id}&code=${a.code}` });
+    assert.equal(st.data.booking.holdExpired, true);
+    assert.equal(st.data.booking.status, "pending"); // the record itself is kept for the owner
+    const b = await bookAt(date, open, { serviceId: "soft-glam", name: "Second Client" });
+    assert.equal(b.status, 200, JSON.stringify(b.data)); // the freed slot can be booked
+  });
+});
+
+test("a booking with a receipt is never released by the clock", async () => {
+  const { date, open } = await bookable(4);
+  const a = (await bookAt(date, open, { receipt: receipt(2000) })).data.booking;
+  assert.equal(a.holdUntil, null);
+  await afterwards(30 * HOUR, async () => {
+    assert.equal((await publicTaken()).filter((t) => t.date === date && t.time === open).length, 1);
+    assert.equal((await bookAt(date, open, { name: "Latecomer" })).status, 409);
+  });
+});
+
+test("confirming a payment makes the booking permanent: it keeps its slot after the hold would have run out", async () => {
+  const cookie = await ownerCookie();
+  const { date, open } = await bookable(4);
+  const a = (await bookAt(date, open)).data.booking;
+  const done = await ownerPost(cookie, { action: "status", id: a.id, status: "confirmed" });
+  assert.equal(done.status, 200);
+  assert.equal(done.data.booking.holdUntil, undefined);
+  await afterwards(30 * HOUR, async () => {
+    assert.equal((await publicTaken()).filter((t) => t.date === date && t.time === open).length, 1);
+    assert.equal((await bookAt(date, open, { name: "Too Late" })).status, 409);
+    const st = await call(status.GET, { path: `/api/status?id=${a.id}&code=${a.code}` });
+    assert.deepEqual([st.data.booking.status, st.data.booking.holdExpired], ["confirmed", false]);
+  });
+});
+
+test("confirming after the hold ran out re-books the slot if it is still free, and refuses if someone else has it", async () => {
+  const cookie = await ownerCookie();
+  const { date, open } = await bookable(4); // far enough ahead to still be in the future after 40 hours
+
+  // 1. nobody else took it: the late payment can still be confirmed, and then it is permanent
+  const a = (await bookAt(date, open)).data.booking;
+  await afterwards(4 * HOUR, async () => {
+    const ok = await ownerPost(cookie, { action: "status", id: a.id, status: "confirmed" });
+    assert.equal(ok.status, 200, JSON.stringify(ok.data));
+    assert.equal((await publicTaken()).filter((t) => t.date === date && t.time === open).length, 1);
+  });
+  await afterwards(40 * HOUR, async () => {
+    assert.equal((await publicTaken()).filter((t) => t.date === date && t.time === open).length, 1);
+  });
+
+  // 2. someone else took the slot after the hold ran out: the owner is told, nothing is double-booked
+  const { date: d2, open: o2 } = await bookable(2);
+  const first = (await bookAt(d2, o2, { name: "First Client" })).data.booking;
+  await afterwards(4 * HOUR, async () => {
+    assert.equal((await bookAt(d2, o2, { name: "Second Client", receipt: receipt(2000) })).status, 200);
+    const refused = await ownerPost(cookie, { action: "status", id: first.id, status: "confirmed" });
+    assert.deepEqual([refused.status, refused.data.error], [409, "slot_taken"]);
+    assert.ok(refused.data.message.includes("someone else"), refused.data.message);
+  });
+  const still = (await call(owner.GET, { path: "/api/owner", cookie })).data.bookings.find((b) => b.id === first.id);
+  assert.equal(still.status, "pending"); // untouched, so the owner can reject it or contact the client
+});
+
+test("reserving the same booking twice is harmless (it replaces its own entry)", async () => {
+  const { reserveSlot } = await import("../api/_lib/bookings.js");
+  const { date, open } = await bookable(1);
+  await reserveSlot({ date, time: open, mins: 90, id: "same-booking-1", holdUntil: Date.now() + HOUR });
+  await reserveSlot({ date, time: open, mins: 90, id: "same-booking-1" });
+  const taken = (await publicTaken()).filter((t) => t.date === date);
+  assert.equal(taken.length, 1);
+  await afterwards(10 * HOUR, async () => assert.equal((await publicTaken()).filter((t) => t.date === date).length, 1)); // the second call dropped the hold
+});
+
+test("rejecting or deleting an unpaid booking still frees its slot at once", async () => {
+  const cookie = await ownerCookie();
+  const { date, open } = await bookable(1);
+  const a = (await bookAt(date, open)).data.booking;
+  assert.equal((await ownerPost(cookie, { action: "status", id: a.id, status: "rejected" })).status, 200);
+  assert.equal((await bookAt(date, open, { name: "After Reject" })).status, 200);
+});
+
+// ---------- rate limiting ----------
+
+const fromIp = (ip) => ({ "x-forwarded-for": `${ip}, 10.0.0.1` });
+
+test("booking requests are limited per visitor address: 12 in 10 minutes, then a 429", async () => {
+  const hit = (ip) => call(book.POST, { method: "POST", path: "/api/book", body: {}, headers: fromIp(ip) });
+  for (let i = 0; i < 12; i++) assert.equal((await hit("203.0.113.9")).status, 400, `request ${i + 1}`); // refused for other reasons, but counted
+  const blocked = await hit("203.0.113.9");
+  assert.deepEqual([blocked.status, blocked.data.error], [429, "too_many_requests"]);
+  assert.ok(blocked.data.message.includes("wait a few minutes"));
+  assert.equal((await hit("203.0.113.10")).status, 400); // another visitor is not affected
+  await afterwards(11 * 60_000, async () => assert.equal((await hit("203.0.113.9")).status, 400)); // the next window starts fresh
+  // addresses are never stored as such
+  const kept = __mock.paths("rl/");
+  assert.ok(kept.length >= 3 && kept.every((p) => !p.includes("203.0.113")), kept.join(", "));
+  // without an address (these tests, local development) there is nothing to limit by
+  for (let i = 0; i < 14; i++) assert.equal((await call(book.POST, { method: "POST", path: "/api/book", body: {} })).status, 400);
+});
+
+test("a real booking still goes through for a visitor who is within the limit", async () => {
+  const { date, open } = await bookable(1);
+  const r = await call(book.POST, { method: "POST", path: "/api/book", body: base({ date, time: open }), headers: fromIp("203.0.113.50") });
+  assert.equal(r.status, 200);
+});
+
+test("sign-in attempts are limited per visitor address: 20 in 10 minutes, then a 429", async () => {
+  const hit = (ip) => call(auth.POST, { method: "POST", body: { password: process.env.OWNER_PASSWORD }, headers: fromIp(ip) });
+  for (let i = 0; i < 20; i++) assert.equal((await hit("198.51.100.7")).status, 200, `sign-in ${i + 1}`);
+  assert.equal((await hit("198.51.100.7")).status, 429);
+  assert.equal((await hit("198.51.100.8")).status, 200);
+});

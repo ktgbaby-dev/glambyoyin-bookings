@@ -1,6 +1,6 @@
 // GET /api/public: studio settings plus taken slots for the next 21 days.
 // No client details, only {date, time, mins}.
-import { DAYS_AHEAD } from "./_lib/bookings.js";
+import { DAYS_AHEAD, liveEntries } from "./_lib/bookings.js";
 import { handle, json } from "./_lib/http.js";
 import { loadSettings, publicSettings } from "./_lib/settings.js";
 import { mapLimit, readJson } from "./_lib/store.js";
@@ -16,7 +16,7 @@ export function GET(request) {
     const days = await mapLimit(dates, 7, async (date) => ({ date, file: await readJson(`days/${date}.json`) }));
     const taken = [];
     for (const { date, file } of days) {
-      for (const e of file?.data.entries ?? []) taken.push({ date, time: e.time, mins: e.mins });
+      for (const e of liveEntries(file?.data.entries ?? [], now)) taken.push({ date, time: e.time, mins: e.mins });
     }
 
     return json({ settings: publicSettings(settings), taken, now, today });

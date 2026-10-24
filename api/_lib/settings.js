@@ -19,6 +19,7 @@ export const DEFAULT_SETTINGS = {
   instagram: "https://www.instagram.com/glambyoyin_/",
   depositPct: 50,
   allowFullPayment: true, // clients may pay the whole price up front instead of the deposit
+  holdHours: 3, // a booking with no receipt holds its slot this long; 0 = until the owner decides
   bank: { name: "Ecobank", accountNumber: "0250147305", accountName: "Obaseki Oyindamola" },
   policy:
     "Payment validates your booking. Once a payment has been made, your booking is final and refunds are not allowed. " +
@@ -235,6 +236,10 @@ export function cleanSettings(input) {
   if (instagram && !/^https:\/\/(www\.)?instagram\.com\/[A-Za-z0-9._]+\/?$/.test(instagram)) {
     throw new HttpError(400, "invalid_settings", "Use the full Instagram link, like https://www.instagram.com/yourname/");
   }
+  const holdHours = input.holdHours == null ? DEFAULT_SETTINGS.holdHours : Number(input.holdHours);
+  if (!Number.isInteger(holdHours) || holdHours < 0 || holdHours > 72) {
+    throw new HttpError(400, "invalid_settings", "Hold unpaid bookings for a whole number of hours between 0 and 72.");
+  }
   return {
     name: text(input.name, 60, { required: true, label: "Studio name" }),
     area: text(input.area, 60, { label: "Area" }),
@@ -245,6 +250,7 @@ export function cleanSettings(input) {
     instagram,
     depositPct,
     allowFullPayment: input.allowFullPayment !== false,
+    holdHours,
     bank: {
       name: text(input.bank?.name, 60, { required: true, label: "Bank name" }),
       accountNumber: digits(input.bank?.accountNumber, 6, 20, "Account number"),

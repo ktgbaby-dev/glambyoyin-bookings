@@ -58,6 +58,12 @@ export function cleanReceipt(receipt) {
   return { type, buffer };
 }
 
+// A booking that still owes a payment and has no receipt only holds its slot for a while.
+// Entries in days/<date>.json carry the same `holdUntil`; once it passes they stop counting.
+export const holdLapsed = (holdUntil, nowMs) => !!holdUntil && holdUntil <= nowMs;
+export const liveEntries = (entries, nowMs) => entries.filter((e) => !holdLapsed(e.holdUntil, nowMs));
+export const isHoldExpired = (b, nowMs) => b.status === "pending" && holdLapsed(b.holdUntil, nowMs);
+
 // How the client will pay: the deposit (the default), or the whole price when the studio offers that.
 function cleanPayment(value, settings) {
   if (value == null || value === "" || value === "deposit") return "deposit";
@@ -120,6 +126,10 @@ export function validateBooking(input, settings, nowMs) {
   // `deposit` is what the client pays now: the deposit, or the whole price when they pay in full.
   const payment = cleanPayment(input.payment, settings);
   const deposit = payment === "full" ? item.price : depositFor(item.price, settings.depositPct);
+  // No receipt yet and something to pay: hold the slot for a while, never past the start of the appointment.
+  const holdUntil = deposit > 0 && !receipt && settings.holdHours > 0
+    ? Math.min(nowMs + settings.holdHours * 3_600_000, zonedToEpoch(date, time, settings.tz))
+    : null;
   return {
     receipt,
     fields: {
@@ -133,6 +143,7 @@ export function validateBooking(input, settings, nowMs) {
       depositPct: payment === "full" ? 100 : settings.depositPct,
       deposit,
       balance: item.price - deposit,
+      ...(holdUntil ? { holdUntil } : {}),
       date,
       time,
       name,
@@ -156,17 +167,20 @@ async function lostRace(date, seen) {
   return seen ? now?.etag !== seen.etag : !!now;
 }
 
-export async function reserveSlot({ date, time, mins, id }) {
+// Idempotent for the same booking `id`: reserving again replaces its entry (this is how a confirmed
+// booking drops its hold). Entries whose hold has lapsed no longer count and are cleared on the way.
+export async function reserveSlot({ date, time, mins, id, holdUntil = null, nowMs = Date.now() }) {
   for (let attempt = 0; attempt < RESERVE_ATTEMPTS; attempt++) {
     const cur = await readJson(dayPath(date));
-    const entries = cur?.data.entries ?? [];
+    const entries = liveEntries((cur?.data.entries ?? []).filter((e) => e.id !== id), nowMs);
     const start = toMins(time);
     if (entries.some((e) => overlaps(start, mins, toMins(e.time), e.mins))) {
       throw new HttpError(409, "slot_taken", "Sorry, that time was just taken. Please pick another.", "time");
     }
     try {
       // Existing file: only write if nobody changed it (ifMatch). New day: create-only.
-      await writeJson(dayPath(date), { entries: [...entries, { id, time, mins }] }, cur ? { ifMatch: cur.etag } : "create");
+      const entry = { id, time, mins, ...(holdUntil ? { holdUntil } : {}) };
+      await writeJson(dayPath(date), { entries: [...entries, entry] }, cur ? { ifMatch: cur.etag } : "create");
       return;
     } catch (err) {
       if (!(await lostRace(date, cur))) throw err;
@@ -193,7 +207,7 @@ export async function releaseSlot(date, id) {
 }
 
 // What a client may see about their own booking.
-export function clientView(b) {
+export function clientView(b, nowMs = Date.now()) {
   return {
     id: b.id,
     code: b.code,
@@ -212,6 +226,8 @@ export function clientView(b) {
     time: b.time,
     name: b.name,
     hasReceipt: !!b.hasReceipt,
+    holdUntil: b.holdUntil ?? null,
+    holdExpired: isHoldExpired(b, nowMs),
     createdAt: b.createdAt,
   };
 }

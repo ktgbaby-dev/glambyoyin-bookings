@@ -1,6 +1,6 @@
 // GLAM BY OYIN bookings: client page.
 import {
-  ApiError, DOW_SHORT, MONTH_SHORT, addDays, api, bookingTitle, dow, duration, esc, fmtDate, fmtRange, fmtTime,
+  ApiError, DOW_SHORT, MONTH_SHORT, addDays, api, bookingTitle, dow, duration, esc, fmtDate, fmtHold, fmtRange, fmtTime,
   fromMins, isAllDay, naira, pill, studioDate, studioMinutes, toMins, weekdayKey, wireCopyButtons, zonedToEpoch,
 } from "./lib.js";
 
@@ -438,6 +438,12 @@ function renderStep3() {
   if (!choice) state.payment = "deposit";
   const full = state.payment === "full";
   const payNow = full ? svc.price : deposit;
+  const hold = !free && s.holdHours > 0;
+  $("#hold-note").hidden = !hold;
+  if (hold) {
+    const n = s.holdHours;
+    $("#hold-note").textContent = `No receipt yet? We hold your slot for ${n} hour${n === 1 ? "" : "s"} while we wait for your payment, then release it. Adding your receipt keeps it until we've checked.`;
+  }
   $("#pay-options").hidden = !choice;
   if (choice) {
     $("#pay-grid").innerHTML = [
@@ -678,13 +684,19 @@ function remember(booking) {
 
 // "deposit" or "payment", whichever the client chose to pay.
 const payWord = (b) => (b.payment === "full" ? "payment" : "deposit");
+// A pending booking whose hold has run out is shown as "expired".
+const shownStatus = (b) => (b.holdExpired ? "expired" : b.status);
+const onHold = (b) => b.status === "pending" && !b.hasReceipt && !!b.holdUntil && !b.holdExpired;
 const ticketCopy = (b) => ({
-  pending: ["Your slot is held", `We'll confirm once your ${payWord(b)} clears. Keep your booking code safe.`],
+  pending: ["Your slot is held", onHold(b)
+    ? `Your slot is held until ${fmtHold(b.holdUntil, state.settings?.tz || "Africa/Lagos", now())}. Send your ${payWord(b)} receipt before then and we'll confirm it. Keep your booking code safe.`
+    : `We'll confirm once your ${payWord(b)} clears. Keep your booking code safe.`],
+  expired: ["Your hold has ended", `We didn't receive your ${payWord(b)} in time, so the slot was released. If you have paid, message us on WhatsApp with your booking code and receipt and we'll check.`],
   confirmed: ["You're confirmed", `Your ${payWord(b)} is confirmed. See you in the chair.`],
   rejected: [`We didn't receive your ${payWord(b)}`, "Your slot has been released. Message us on WhatsApp if you think this is a mistake."],
   done: ["Thank you for coming", "We hope you loved your look."],
   noshow: ["We missed you", "Your slot has been released. Message us on WhatsApp to book again."],
-})[b.status] || null;
+})[shownStatus(b)] || null;
 
 // quiet: refresh the ticket in place (a status poll) without scrolling or moving focus.
 function showTicket(b, { fresh = false, quiet = false } = {}) {
@@ -692,7 +704,8 @@ function showTicket(b, { fresh = false, quiet = false } = {}) {
   const [title, note] = ticketCopy(b) || ticketCopy({ ...b, status: "pending" });
   const what = bookingTitle(b);
   const msg = `Hi, I've just booked ${what}${b.lookName ? ` (total ${naira(b.price)})` : ""} for ${fmtDate(b.date)} at ${fmtTime(b.time)}. My booking code is ${b.code}. Here is my ${payWord(b)} receipt.`;
-  const needsReceipt = b.status === "pending" && !b.hasReceipt && b.deposit > 0;
+  const needsReceipt = b.status === "pending" && !b.holdExpired && !b.hasReceipt && b.deposit > 0;
+  const lateMsg = `Hi, my hold for ${what} has ended but I have paid. My booking code is ${b.code}. Here is my ${payWord(b)} receipt.`;
   $("#ticket-view").innerHTML = `
     <div class="ticket-wrap">
       <div class="ticket-intro">
@@ -719,8 +732,9 @@ function showTicket(b, { fresh = false, quiet = false } = {}) {
         <div class="ticket-bottom">
           <span class="label">Booking code</span>
           <div class="ticket-code" aria-label="Booking code ${esc(b.code.split("").join(" "))}">${esc(b.code)}</div>
-          ${pill(b.status)}
+          ${pill(shownStatus(b))}
           ${needsReceipt ? `<div><a class="btn btn-primary btn-sm" href="${esc(waLink(msg))}" target="_blank" rel="noopener">Send receipt on WhatsApp</a></div>` : ""}
+          ${b.holdExpired ? `<div><a class="btn btn-primary btn-sm" href="${esc(waLink(lateMsg))}" target="_blank" rel="noopener">I've paid, message us</a></div>` : ""}
           <p class="ticket-note">${esc(note)}</p>
         </div>
       </article>
@@ -746,7 +760,7 @@ function renderMine() {
     .map((b) => `<button type="button" class="my-item" data-id="${esc(b.id)}">
       <span class="my-name">${esc(bookingTitle(b))}</span>
       <span class="my-when">${esc(fmtDate(b.date, { short: true }))} · ${esc(fmtTime(b.time))} · ${esc(b.code)}</span>
-      ${pill(b.status)}</button>`)
+      ${pill(shownStatus(b))}</button>`)
     .join("");
 }
 
