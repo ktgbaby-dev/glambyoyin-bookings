@@ -34,7 +34,22 @@ export const DEFAULT_SETTINGS = {
   services: [
     { id: "soft-glam", name: "Soft Glam", category: "Makeup", price: 25000, mins: 90 },
     { id: "full-glam", name: "Full Glam", category: "Makeup", price: 35000, mins: 120 },
-    { id: "bridal-glam", name: "Bridal Glam", category: "Makeup", price: 80000, mins: 150 },
+    // A service with `looks` is booked by choosing one look. Its own price and
+    // minutes are the lowest of its looks ("from"), worked out by cleanServices.
+    // A look with `includes` is a bundle: its minutes are the sum of the looks it
+    // includes. A `perPerson` look is priced and timed per person.
+    {
+      id: "bridal-glam", name: "Bridal Glam", category: "Makeup", price: 25000, mins: 60,
+      lookTitle: "Choose Your Bridal Look",
+      looks: [
+        { id: "introduction", name: "Introduction", price: 50000, mins: 120 },
+        { id: "registry", name: "Registry", price: 50000, mins: 120 },
+        { id: "traditional", name: "Traditional Wedding", price: 80000, mins: 150 },
+        { id: "white-wedding", name: "White / Church Wedding", price: 80000, mins: 150 },
+        { id: "aso-ebi", name: "Aso-Ebi / Bridesmaids", price: 25000, mins: 60, perPerson: true, maxQty: 8 },
+        { id: "wedding-combo", name: "Wedding Combo: Traditional + White/Church Wedding", price: 150000, mins: 300, includes: ["traditional", "white-wedding"] },
+      ],
+    },
     { id: "classic-lashes", name: "Classic Lash Extensions", category: "Lashes", price: 15000, mins: 90 },
     { id: "hybrid-lashes", name: "Hybrid Lash Extensions", category: "Lashes", price: 20000, mins: 120 },
     { id: "volume-lashes", name: "Volume Lash Extensions", category: "Lashes", price: 25000, mins: 150 },
@@ -91,6 +106,70 @@ function slug(name) {
   return `${base}-${randomBytes(2).toString("hex")}`;
 }
 
+const MAX_LOOKS = 12;
+const MAX_LOOK_QTY = 20;
+const MAX_MINS = 480;
+
+const validMins = (n) => Number.isInteger(n) && n >= 30 && n <= MAX_MINS && n % 30 === 0;
+const validPrice = (n) => Number.isInteger(n) && n >= 0 && n <= 10_000_000;
+
+// The looks of one service (see DEFAULT_SETTINGS). Bundles list the ids of the
+// single looks they include; their minutes are the sum of those, so they can't drift.
+function cleanLooks(input, serviceName, longestDay) {
+  if (input.length > MAX_LOOKS) throw new HttpError(400, "invalid_settings", `${serviceName} has more than ${MAX_LOOKS} looks.`);
+  const seen = new Set();
+  const looks = input.map((raw) => {
+    const name = text(raw?.name, 60, { required: true, label: `Each look name in ${serviceName}` });
+    const price = Number(raw?.price);
+    if (!validPrice(price)) throw new HttpError(400, "invalid_settings", `Enter a whole-naira price for ${name}.`);
+    let id = typeof raw?.id === "string" && /^[a-z0-9-]{2,48}$/.test(raw.id) ? raw.id : slug(name);
+    while (seen.has(id)) id = slug(name);
+    seen.add(id);
+    return { id, name, price, raw };
+  });
+
+  const byId = new Map(looks.map((l) => [l.id, l]));
+  const out = [];
+  for (const look of looks) {
+    const { raw } = look;
+    if (Array.isArray(raw.includes) && raw.includes.length) {
+      const parts = raw.includes.map((pid) => byId.get(pid));
+      if (parts.length < 2 || parts.some((p) => !p || p.raw.includes?.length || p.raw.perPerson) || new Set(raw.includes).size !== parts.length) {
+        throw new HttpError(400, "invalid_settings", `${look.name} can only bundle two or more single, per-booking looks from ${serviceName}.`);
+      }
+      const mins = parts.reduce((sum, p) => sum + Number(p.raw.mins), 0);
+      if (!parts.every((p) => validMins(Number(p.raw.mins))) || mins > MAX_MINS || (longestDay && mins > longestDay)) {
+        throw new HttpError(400, "invalid_settings", `${look.name} is longer than any opening day, so it could never be booked.`);
+      }
+      out.push({ id: look.id, name: look.name, price: look.price, mins, includes: [...raw.includes] });
+      continue;
+    }
+    const mins = Number(raw.mins);
+    if (!validMins(mins)) {
+      throw new HttpError(400, "invalid_settings", `${look.name} needs a length in 30-minute steps (30 min to 8 hours).`);
+    }
+    if (raw.perPerson === true) {
+      const maxQty = raw.maxQty == null ? 8 : Number(raw.maxQty);
+      if (!Number.isInteger(maxQty) || maxQty < 2 || maxQty > MAX_LOOK_QTY) {
+        throw new HttpError(400, "invalid_settings", `${look.name}: the most people per booking should be between 2 and ${MAX_LOOK_QTY}.`);
+      }
+      if (mins * maxQty > MAX_MINS) {
+        throw new HttpError(400, "invalid_settings", `${look.name}: ${maxQty} people at ${mins} minutes each is more than 8 hours. Lower the number of people.`);
+      }
+      if (longestDay && mins > longestDay) {
+        throw new HttpError(400, "invalid_settings", `${look.name} is longer than any opening day, so it could never be booked.`);
+      }
+      out.push({ id: look.id, name: look.name, price: look.price, mins, perPerson: true, maxQty });
+      continue;
+    }
+    if (longestDay && mins > longestDay) {
+      throw new HttpError(400, "invalid_settings", `${look.name} is longer than any opening day, so it could never be booked.`);
+    }
+    out.push({ id: look.id, name: look.name, price: look.price, mins });
+  }
+  return out;
+}
+
 function cleanServices(input, hours) {
   if (!Array.isArray(input) || input.length === 0) {
     throw new HttpError(400, "invalid_settings", "Add at least one service.");
@@ -102,20 +181,34 @@ function cleanServices(input, hours) {
     const name = text(svc?.name, 60, { required: true, label: "Each service name" });
     const category = CATEGORIES.includes(svc?.category) ? svc.category : null;
     if (!category) throw new HttpError(400, "invalid_settings", `Pick a category for ${name}.`);
+    let id = typeof svc?.id === "string" && /^[a-z0-9-]{2,48}$/.test(svc.id) ? svc.id : slug(name);
+    while (seen.has(id)) id = slug(name);
+    seen.add(id);
+
+    // A service with looks is "from" its cheapest and shortest look.
+    if (Array.isArray(svc?.looks) && svc.looks.length) {
+      const looks = cleanLooks(svc.looks, name, longestDay);
+      const lookTitle = text(svc.lookTitle, 60, { label: "The look heading" }) || "Choose your look";
+      return {
+        id, name, category,
+        price: Math.min(...looks.map((l) => l.price)),
+        mins: Math.min(...looks.map((l) => l.mins)),
+        lookTitle,
+        looks,
+      };
+    }
+
     const price = Number(svc?.price);
-    if (!Number.isInteger(price) || price < 0 || price > 10_000_000) {
+    if (!validPrice(price)) {
       throw new HttpError(400, "invalid_settings", `Enter a whole-naira price for ${name}.`);
     }
     const mins = Number(svc?.mins);
-    if (!Number.isInteger(mins) || mins < 30 || mins > 480 || mins % 30 !== 0) {
+    if (!validMins(mins)) {
       throw new HttpError(400, "invalid_settings", `${name} needs a length in 30-minute steps (30 min to 8 hours).`);
     }
     if (longestDay && mins > longestDay) {
       throw new HttpError(400, "invalid_settings", `${name} is longer than any opening day, so it could never be booked.`);
     }
-    let id = typeof svc?.id === "string" && /^[a-z0-9-]{2,48}$/.test(svc.id) ? svc.id : slug(name);
-    while (seen.has(id)) id = slug(name);
-    seen.add(id);
     return { id, name, category, price, mins };
   });
 }

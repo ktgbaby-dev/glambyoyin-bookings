@@ -222,10 +222,10 @@ console.log("\nTwo people, one slot");
 await step("simultaneous bookings: one ticket, the other is told it's taken and sent back to pick another time", async () => {
   const B = await newPhone("B");
   const C = await newPhone("C");
-  // a service/slot nobody has used yet: Bridal Glam (150 min), first free slot
+  // a service/slot nobody has used yet: Volume Lash Extensions (150 min), first free slot
   await Promise.all([
-    toDeposit(B.page, { name: "Chioma B", phone: "08033334444", serviceId: "bridal-glam" }),
-    toDeposit(C.page, { name: "Dayo C", phone: "08055556666", serviceId: "bridal-glam" }),
+    toDeposit(B.page, { name: "Chioma B", phone: "08033334444", serviceId: "volume-lashes" }),
+    toDeposit(C.page, { name: "Dayo C", phone: "08055556666", serviceId: "volume-lashes" }),
   ]);
   const slotB = await B.page.textContent("#deposit-sub");
   const slotC = await C.page.textContent("#deposit-sub");

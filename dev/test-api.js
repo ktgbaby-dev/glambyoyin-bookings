@@ -441,3 +441,149 @@ test("saved settings reach a fresh visitor; bad settings are refused", async () 
   assert.equal((await bad((s) => { s.bank.name = ""; })).status, 400);
   assert.equal((await call(pub.GET)).data.settings.depositPct, 30); // refused saves changed nothing
 });
+
+// ---------- bridal looks ----------
+
+const bridal = (over = {}) => ({ ...base(), serviceId: "bridal-glam", date: "2026-10-28", time: "10:00", ...over });
+const LOOK_NOW = Date.UTC(2026, 9, 27, 7, 0); // Tue 27 Oct 2026, 08:00 Lagos; Wed 28 Oct is a 9-hour day
+const priced = (over) => validateBooking(bridal(over), DEFAULT_SETTINGS, LOOK_NOW).fields;
+
+test("the default settings are already in their cleaned form, so derived values can't drift", async () => {
+  const { cleanSettings } = await import("../api/_lib/settings.js");
+  const cleaned = cleanSettings(DEFAULT_SETTINGS);
+  assert.deepEqual(cleaned.services, DEFAULT_SETTINGS.services);
+});
+
+test("Bridal Glam is booked by look: each look's price comes from the server", () => {
+  const svc = DEFAULT_SETTINGS.services.find((s) => s.id === "bridal-glam");
+  assert.equal(svc.lookTitle, "Choose Your Bridal Look");
+  assert.equal(svc.looks.length, 6);
+  assert.equal(svc.price, 25000); // "from" price, derived from the cheapest look
+  const prices = Object.fromEntries(svc.looks.map((l) => [l.id, l.price]));
+  assert.deepEqual(prices, { introduction: 50000, registry: 50000, traditional: 80000, "white-wedding": 80000, "aso-ebi": 25000, "wedding-combo": 150000 });
+
+  const intro = priced({ lookId: "introduction" });
+  assert.equal(intro.lookName, "Introduction");
+  assert.equal(intro.price, 50000);
+  assert.equal(intro.deposit, 25000);
+  assert.equal(intro.balance, 25000);
+  assert.equal(intro.mins, 120);
+  assert.equal(intro.qty, 1);
+  assert.equal(intro.serviceName, "Bridal Glam");
+
+  assert.equal(priced({ lookId: "registry" }).price, 50000);
+  assert.equal(priced({ lookId: "traditional" }).price, 80000);
+  assert.equal(priced({ lookId: "white-wedding" }).price, 80000);
+});
+
+test("Wedding Combo costs ₦150,000, which is ₦10,000 less than booking both looks", () => {
+  const svc = DEFAULT_SETTINGS.services.find((s) => s.id === "bridal-glam");
+  const combo = priced({ lookId: "wedding-combo" });
+  assert.equal(combo.price, 150000);
+  assert.equal(combo.deposit, 75000);
+  assert.equal(combo.mins, 300); // the two looks back to back
+  const includes = svc.looks.find((l) => l.id === "wedding-combo").includes;
+  const both = svc.looks.filter((l) => includes.includes(l.id)).reduce((n, l) => n + l.price, 0);
+  assert.equal(both, 160000);
+  assert.equal(both - combo.price, 10000);
+});
+
+test("Aso-Ebi is per person: ₦25,000 each, so three people is ₦75,000 and three times the time", () => {
+  const f = priced({ lookId: "aso-ebi", qty: 3 });
+  assert.equal(f.qty, 3);
+  assert.equal(f.unitPrice, 25000);
+  assert.equal(f.price, 75000);
+  assert.equal(f.deposit, 37500);
+  assert.equal(f.mins, 180);
+  assert.equal(priced({ lookId: "aso-ebi", qty: "2" }).price, 50000); // a numeric string is fine
+  assert.equal(priced({ lookId: "aso-ebi", qty: 8 }).price, 200000);
+});
+
+test("looks: a missing or unknown look, a bad number of people, and tampering are all refused or ignored", () => {
+  const rejects = (over, field = "look") => assert.throws(() => priced(over), (e) => e.status === 400 && e.field === field, JSON.stringify(over));
+  rejects({}); // Bridal Glam needs a look
+  rejects({ lookId: "nope" });
+  rejects({ lookId: "aso-ebi" }); // people missing
+  rejects({ lookId: "aso-ebi", qty: 0 });
+  rejects({ lookId: "aso-ebi", qty: 9 }); // over the limit of 8
+  rejects({ lookId: "aso-ebi", qty: 1.5 });
+  rejects({ lookId: "aso-ebi", qty: "many" });
+  rejects({ lookId: "aso-ebi", qty: 8, time: "15:00" }, "time"); // 8 people take 8 hours: past closing
+  // Quantity only means something for per-person looks; price, minutes and totals sent by the client are ignored.
+  const f = priced({ lookId: "introduction", qty: 5, price: 1, mins: 30, unitPrice: 1, deposit: 1 });
+  assert.equal(f.qty, 1);
+  assert.equal(f.price, 50000);
+  assert.equal(f.mins, 120);
+  // Other services don't take a look at all.
+  const plain = validateBooking({ ...base(), date: "2026-10-28", time: "10:00", lookId: "introduction", qty: 4 }, DEFAULT_SETTINGS, LOOK_NOW).fields;
+  assert.equal(plain.price, 25000);
+  assert.equal(plain.lookName, undefined);
+});
+
+test("a look booking takes the whole slot: the booking, status, owner list and public slots all agree", async () => {
+  const cookie = await ownerCookie();
+  const { date, open } = await bookable(1);
+  const r = await bookAt(date, open, { serviceId: "bridal-glam", lookId: "aso-ebi", qty: 3 });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const b = r.data.booking;
+  assert.deepEqual([b.serviceName, b.lookName, b.qty, b.unitPrice, b.price, b.deposit, b.balance, b.mins], ["Bridal Glam", "Aso-Ebi / Bridesmaids", 3, 25000, 75000, 37500, 37500, 180]);
+
+  const st = await call(status.GET, { path: `/api/status?id=${b.id}&code=${b.code}` });
+  assert.deepEqual([st.data.booking.lookName, st.data.booking.qty, st.data.booking.price], ["Aso-Ebi / Bridesmaids", 3, 75000]);
+
+  const list = (await call(owner.GET, { path: "/api/owner", cookie })).data.bookings;
+  const stored = list.find((x) => x.id === b.id);
+  assert.deepEqual([stored.lookId, stored.lookName, stored.qty, stored.unitPrice, stored.price], ["aso-ebi", "Aso-Ebi / Bridesmaids", 3, 25000, 75000]);
+
+  // 180 minutes are held: a booking at the same start time clashes
+  const clash = await bookAt(date, open, { serviceId: "soft-glam" });
+  assert.equal(clash.status, 409);
+  const taken = (await call(pub.GET)).data.taken.find((t) => t.date === date && t.time === open);
+  assert.equal(taken.mins, 180);
+});
+
+test("looks survive a settings save, and bad looks are refused", async () => {
+  const { cleanSettings } = await import("../api/_lib/settings.js");
+  const cookie = await ownerCookie();
+  const current = (await call(owner.GET, { path: "/api/owner", cookie })).data.settings;
+  const edited = structuredClone(current);
+  const svc = edited.services.find((s) => s.id === "bridal-glam");
+  svc.looks.find((l) => l.id === "introduction").price = 60000;
+  svc.looks.find((l) => l.id === "wedding-combo").price = 140000;
+
+  const saved = await ownerPost(cookie, { action: "settings", settings: edited });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  const seen = (await call(pub.GET)).data.settings.services.find((s) => s.id === "bridal-glam");
+  assert.equal(seen.looks.find((l) => l.id === "introduction").price, 60000);
+  assert.equal(seen.looks.find((l) => l.id === "wedding-combo").mins, 300);
+  assert.equal(seen.price, 25000);
+
+  const { date, open } = await bookable(1);
+  const b = (await bookAt(date, open, { serviceId: "bridal-glam", lookId: "wedding-combo" })).data.booking;
+  assert.equal(b.price, 140000); // the new price applies to new bookings
+
+  const bad = (mutate) => {
+    const s = structuredClone(edited);
+    mutate(s.services.find((x) => x.id === "bridal-glam"));
+    return ownerPost(cookie, { action: "settings", settings: s });
+  };
+  const combo = (s) => s.looks.find((l) => l.id === "wedding-combo");
+  assert.equal((await bad((s) => { s.looks[0].price = 99.5; })).status, 400);
+  assert.equal((await bad((s) => { s.looks[0].name = ""; })).status, 400);
+  assert.equal((await bad((s) => { s.looks[0].mins = 45; })).status, 400);
+  assert.equal((await bad((s) => { combo(s).includes = ["traditional", "nope"]; })).status, 400);
+  assert.equal((await bad((s) => { combo(s).includes = ["traditional"]; })).status, 400); // a bundle needs two or more
+  assert.equal((await bad((s) => { combo(s).includes = ["traditional", "aso-ebi"]; })).status, 400); // per-person looks can't be bundled
+  assert.equal((await bad((s) => { combo(s).includes = ["traditional", "wedding-combo"]; })).status, 400); // no bundle inside a bundle
+  assert.equal((await bad((s) => { s.looks.find((l) => l.id === "aso-ebi").maxQty = 9; })).status, 400); // 9 x 60 min is over 8 hours
+  assert.equal((await bad((s) => { s.looks.find((l) => l.id === "aso-ebi").maxQty = 1; })).status, 400);
+  assert.equal((await bad((s) => { s.looks = Array.from({ length: 13 }, (_, i) => ({ name: `Look ${i}`, price: 1000, mins: 60 })); })).status, 400);
+  assert.equal((await call(pub.GET)).data.settings.services.find((s) => s.id === "bridal-glam").looks.length, 6); // refused saves changed nothing
+
+  // unknown keys never survive cleaning, and a service whose looks are removed becomes a plain service again
+  const plain = cleanSettings({ ...edited, services: edited.services.map((s) => (s.id === "bridal-glam" ? { ...s, looks: [], price: 80000, mins: 150, extra: "x" } : s)) });
+  const bridalPlain = plain.services.find((s) => s.id === "bridal-glam");
+  assert.equal(bridalPlain.looks, undefined);
+  assert.equal(bridalPlain.extra, undefined);
+  assert.equal(bridalPlain.price, 80000);
+});

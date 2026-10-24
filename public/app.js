@@ -1,6 +1,6 @@
 // GLAM BY OYIN bookings: client page.
 import {
-  ApiError, DOW_SHORT, MONTH_SHORT, addDays, api, dow, duration, esc, fmtDate, fmtRange, fmtTime,
+  ApiError, DOW_SHORT, MONTH_SHORT, addDays, api, bookingTitle, dow, duration, esc, fmtDate, fmtRange, fmtTime,
   fromMins, naira, pill, studioDate, studioMinutes, toMins, weekdayKey, wireCopyButtons, zonedToEpoch,
 } from "./lib.js";
 
@@ -21,6 +21,8 @@ const state = {
   skew: 0,
   category: "all",
   service: null,
+  lookId: null, // for services booked by look (Bridal Glam)
+  qty: 1, // people, for per-person looks
   date: null,
   time: null,
   step: 1,
@@ -94,10 +96,12 @@ function renderServices() {
         .filter((x) => x.category === c)
         .map((x) => {
           const dep = depositFor(x.price, s.depositPct);
-          const meta = s.depositPct > 0 ? `${duration(x.mins)} · ${naira(dep)} deposit` : duration(x.mins);
+          const meta = hasLooks(x)
+            ? "Choose your look next"
+            : s.depositPct > 0 ? `${duration(x.mins)} · ${naira(dep)} deposit` : duration(x.mins);
           return `<div class="service-row">
             <span class="service-name">${esc(x.name)}</span>
-            <span class="service-price">${naira(x.price)}</span>
+            <span class="service-price">${hasLooks(x) ? "From " : ""}${naira(x.price)}</span>
             <span class="service-meta">${esc(meta)}</span>
             <button type="button" class="btn btn-outline btn-sm" data-service="${esc(x.id)}" aria-label="Book ${esc(x.name)}">Book</button>
           </div>`;
@@ -165,18 +169,25 @@ function startBooking(serviceId) {
   const service = state.settings.services.find((x) => x.id === serviceId);
   if (!service) return;
   state.service = service;
+  state.lookId = null;
+  state.qty = 1;
   state.date = null;
   state.time = null;
   clearReceipt();
   $("#book").hidden = false;
   $("#ticket-view").hidden = true;
   $("#flow").hidden = false;
-  $("#book-service").textContent = `${service.name} · ${duration(service.mins)} · ${naira(service.price)}`;
   $("#tz-note").textContent = `All times are ${cityOf(state.settings.tz)} time. Pick a slot at least 2 hours from now.`;
   goStep(1, { focus: false });
+  renderLooks();
   renderStep1();
   scrollToEl($("#book"));
-  $("#step-1 .step-title").focus({ preventScroll: true });
+  stepTitle(1).focus({ preventScroll: true });
+}
+
+// The heading to focus for a step; step 1 starts with the look picker when the service has looks.
+function stepTitle(n) {
+  return n === 1 && hasLooks(state.service) ? $("#look-title") : $(`#step-${n} .step-title`);
 }
 
 function goStep(n, { focus = true } = {}) {
@@ -188,14 +199,21 @@ function goStep(n, { focus = true } = {}) {
     if (i + 1 === n) li.setAttribute("aria-current", "step"); else li.removeAttribute("aria-current");
   });
   if (n === 3) renderStep3();
-  if (focus) $(`#step-${n} .step-title`).focus({ preventScroll: true });
+  if (focus) stepTitle(n).focus({ preventScroll: true });
   if (focus) scrollToEl($("#book"));
 }
 
 function renderStep1() {
+  const o = order();
+  renderHeader();
+  $("#when").hidden = !o; // a service with looks needs a look first: its length decides which times fit
+  if (!o) {
+    $("#s1-next").disabled = true;
+    return;
+  }
   const tmap = takenMap();
   const days = Array.from({ length: DAYS_AHEAD }, (_, i) => addDays(state.today, i)).map((date) => {
-    const slots = slotsFor(date, state.service, tmap);
+    const slots = slotsFor(date, o, tmap);
     return { date, closed: !state.settings.hours[weekdayKey(date)], free: slots.some((x) => x.free), slots };
   });
 
@@ -245,6 +263,133 @@ function showTimesMessage(msg) {
   $("#times-note").textContent = msg;
 }
 
+/* ---- looks: services booked by choosing a look (Bridal Glam) ---- */
+
+const hasLooks = (svc) => !!svc?.looks?.length;
+const selectedLook = () => state.service?.looks?.find((l) => l.id === state.lookId) ?? null;
+const includedLooks = (look) => (look.includes || []).map((id) => state.service.looks.find((l) => l.id === id)).filter(Boolean);
+const wasPrice = (look) => includedLooks(look).reduce((n, l) => n + l.price, 0);
+const savingOf = (look) => Math.max(0, wasPrice(look) - look.price);
+const bundleFor = (look) => state.service.looks.find((l) => l.includes?.includes(look.id)) ?? null;
+
+function longestOpenDay() {
+  return Math.max(0, ...Object.values(state.settings.hours).filter(Boolean).map((h) => toMins(h.close) - toMins(h.open)));
+}
+
+// Most people one booking can take: the look's own limit, and what fits in the longest day.
+function qtyMax(look) {
+  return Math.max(1, Math.min(look.maxQty || 1, Math.floor(longestOpenDay() / look.mins) || 1));
+}
+
+// What the client is booking right now: one service, or one look of it (times the number of people).
+function order() {
+  const svc = state.service;
+  if (!svc) return null;
+  if (!hasLooks(svc)) return { title: svc.name, price: svc.price, mins: svc.mins, look: null, qty: 1 };
+  const look = selectedLook();
+  if (!look) return null;
+  const qty = look.perPerson ? state.qty : 1;
+  return {
+    title: bookingTitle({ serviceName: svc.name, lookName: look.name, qty }),
+    price: look.price * qty,
+    mins: look.mins * qty,
+    look,
+    qty,
+  };
+}
+
+function renderHeader() {
+  const o = order();
+  $("#book-service").textContent = o
+    ? `${o.title} · ${duration(o.mins)} · ${naira(o.price)}`
+    : `${state.service.name} · choose your look`;
+}
+
+function lookCard(look) {
+  const save = savingOf(look);
+  const bundle = !!look.includes?.length;
+  const meta = bundle
+    ? `Includes ${includedLooks(look).map((l) => l.name).join(" + ")} · ${duration(look.mins)}`
+    : look.perPerson ? `${duration(look.mins)} each` : duration(look.mins);
+  return `<button type="button" class="look${bundle ? " look-bundle" : ""}" data-look="${esc(look.id)}" aria-pressed="${state.lookId === look.id}">
+    ${save ? `<span class="look-badge">Save ${naira(save)}</span>` : ""}
+    <span class="look-name">${esc(look.name)}</span>
+    <span class="look-price">${save ? `<s class="look-was"><span class="visually-hidden">Was </span>${naira(wasPrice(look))}</s> ` : ""}${naira(look.price)}${look.perPerson ? `<span class="look-per"> per person</span>` : ""}</span>
+    <span class="look-meta">${esc(meta)}</span>
+  </button>`;
+}
+
+// Builds the look cards (once per booking); updateLooks() keeps the rest in step with the choice.
+function renderLooks() {
+  const svc = state.service;
+  $("#look-picker").hidden = !hasLooks(svc);
+  if (!hasLooks(svc)) return;
+  $("#look-title").textContent = svc.lookTitle || "Choose your look";
+  const bundles = svc.looks.filter((l) => l.includes?.length);
+  $("#looks-featured").innerHTML = bundles.map(lookCard).join("");
+  $("#looks-featured").hidden = bundles.length === 0;
+  $("#looks").innerHTML = svc.looks.filter((l) => !l.includes?.length).map(lookCard).join("");
+  $("#look-note").textContent = "";
+  updateLooks();
+}
+
+function updateLooks() {
+  const look = selectedLook();
+  $$("[data-look]", $("#look-picker")).forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.look === state.lookId)));
+  $("#look-help").hidden = !!look;
+
+  const qtyBox = $("#look-qty");
+  qtyBox.hidden = !look?.perPerson;
+  if (look?.perPerson) {
+    const max = qtyMax(look);
+    state.qty = Math.min(Math.max(1, state.qty), max);
+    const input = $("#qty-input");
+    input.max = String(max);
+    if (document.activeElement !== input) input.value = String(state.qty);
+    $("#qty-minus").disabled = state.qty <= 1;
+    $("#qty-plus").disabled = state.qty >= max;
+    $("#qty-hint").textContent = `${naira(look.price)} per person, ${duration(look.mins)} each. Up to ${max} people in one booking.`;
+  }
+
+  // Booking both single wedding looks one by one costs more than the combo: say so.
+  const bundle = look && !look.includes?.length ? bundleFor(look) : null;
+  const hint = $("#look-hint");
+  hint.hidden = !(bundle && savingOf(bundle) > 0);
+  hint.innerHTML = bundle && savingOf(bundle) > 0
+    ? `Book both and save ${naira(savingOf(bundle))}. <button type="button" class="text-btn" data-switch="${esc(bundle.id)}">Switch to the ${esc(bundle.name.split(":")[0])}</button>`
+    : "";
+
+  const o = order();
+  const total = $("#look-total");
+  total.hidden = !o;
+  if (o) {
+    const dep = depositFor(o.price, state.settings.depositPct);
+    const parts = [];
+    if (o.qty > 1) parts.push(`${o.qty} × ${naira(o.look.price)}`);
+    if (savingOf(o.look) > 0) parts.push(`you save ${naira(savingOf(o.look))}`);
+    parts.push(dep > 0 ? `${naira(dep)} deposit to hold your slot` : "no deposit needed");
+    total.innerHTML = `<span class="label">Your total</span><span class="look-total-amt">${naira(o.price)}</span><span class="look-total-sub">${esc(parts.join(" · "))}</span>`;
+  }
+}
+
+function chooseLook(id) {
+  const look = state.service.looks.find((l) => l.id === id);
+  if (!look || state.lookId === id) return;
+  state.lookId = id;
+  state.qty = 1;
+  $("#look-note").textContent = "";
+  updateLooks();
+  renderStep1();
+}
+
+function setQty(n) {
+  const look = selectedLook();
+  if (!look?.perPerson || !Number.isFinite(n)) return;
+  state.qty = Math.min(Math.max(1, Math.round(n)), qtyMax(look));
+  updateLooks();
+  renderStep1();
+}
+
 /* ---- step 2 ---- */
 
 function setError(field, msg) {
@@ -282,13 +427,13 @@ function validateStep2() {
 
 function renderStep3() {
   const s = state.settings;
-  const svc = state.service;
+  const svc = order();
   const deposit = depositFor(svc.price, s.depositPct);
   const free = deposit === 0;
   $("#deposit-amount").textContent = naira(deposit);
   $("#deposit-sub").textContent = free
     ? `No deposit needed. Your slot is held when you book, and the full ${naira(svc.price)} is paid at the studio.`
-    : `${s.depositPct}% of ${naira(svc.price)} for ${svc.name}, ${fmtDate(state.date)} at ${fmtTime(state.time)}. The remaining ${naira(svc.price - deposit)} is paid at the studio.`;
+    : `${s.depositPct}% of ${naira(svc.price)} for ${svc.title}, ${fmtDate(state.date)} at ${fmtTime(state.time)}. The remaining ${naira(svc.price - deposit)} is paid at the studio.`;
   $("#bank-card").hidden = free;
   $('[data-field="payer"]').hidden = free;
   $('[data-field="receipt"]').hidden = free;
@@ -398,14 +543,14 @@ function setBusy(busy) {
   else renderStep3Label();
 }
 function renderStep3Label() {
-  const free = depositFor(state.service.price, state.settings.depositPct) === 0;
+  const free = depositFor(order().price, state.settings.depositPct) === 0;
   $("#s3-submit").textContent = free ? "Book my slot" : "I've paid, book my slot";
 }
 
 async function submitBooking(e) {
   e.preventDefault();
   if (state.submitting) return;
-  const free = depositFor(state.service.price, state.settings.depositPct) === 0;
+  const free = depositFor(order().price, state.settings.depositPct) === 0;
   const payer = cleanName($("#f-payer").value);
   setError("payer", "");
   if (!free && payer.length < 2) {
@@ -416,6 +561,7 @@ async function submitBooking(e) {
   const name = cleanName($("#f-name").value);
   const body = {
     serviceId: state.service.id,
+    ...(hasLooks(state.service) ? { lookId: state.lookId, qty: order().qty } : {}),
     date: state.date,
     time: state.time,
     name,
@@ -463,6 +609,19 @@ async function handleBookError(err) {
       showTimesMessage(err.message);
       return;
     }
+    if (err.field === "look") {
+      // The studio changed this service's looks while the client was booking.
+      await loadPublic().catch(() => {});
+      const fresh = state.settings.services.find((x) => x.id === state.service.id);
+      if (fresh) state.service = fresh;
+      if (!selectedLook()) state.lookId = null;
+      state.time = null;
+      renderLooks();
+      goStep(1);
+      renderStep1();
+      $("#look-note").textContent = err.message;
+      return;
+    }
     if (err.field === "service") {
       await loadPublic().catch(() => {});
       renderAll();
@@ -497,7 +656,8 @@ const TICKET_COPY = {
 function showTicket(b, { fresh = false, quiet = false } = {}) {
   state.shown = b.id;
   const [title, note] = TICKET_COPY[b.status] || TICKET_COPY.pending;
-  const msg = `Hi, I've just booked ${b.serviceName} for ${fmtDate(b.date)} at ${fmtTime(b.time)}. My booking code is ${b.code}. Here is my deposit receipt.`;
+  const what = bookingTitle(b);
+  const msg = `Hi, I've just booked ${what}${b.lookName ? ` (total ${naira(b.price)})` : ""} for ${fmtDate(b.date)} at ${fmtTime(b.time)}. My booking code is ${b.code}. Here is my deposit receipt.`;
   const needsReceipt = b.status === "pending" && !b.hasReceipt && b.deposit > 0;
   $("#ticket-view").innerHTML = `
     <div class="ticket-wrap">
@@ -508,10 +668,11 @@ function showTicket(b, { fresh = false, quiet = false } = {}) {
       <article class="ticket" aria-label="Booking ticket ${esc(b.code)}">
         <div class="ticket-top">
           <span class="label">${esc(state.settings?.name || "GLAM BY OYIN")}</span>
-          <h3 class="ticket-service">${esc(b.serviceName)}</h3>
+          <h3 class="ticket-service">${esc(what)}</h3>
           <dl>
             <dt>Date</dt><dd>${esc(fmtDate(b.date))}</dd>
             <dt>Time</dt><dd>${esc(fmtTime(b.time))}</dd>
+            ${b.lookName ? `<dt>Total</dt><dd>${naira(b.price)}${b.qty > 1 ? ` (${b.qty} × ${naira(b.unitPrice)})` : ""}</dd>` : ""}
             <dt>Deposit</dt><dd>${naira(b.deposit)}</dd>
             <dt>Balance</dt><dd>${naira(b.balance)} at the studio</dd>
             <dt>Name</dt><dd>${esc(b.name)}</dd>
@@ -546,7 +707,7 @@ function renderMine() {
   $("#mine").hidden = list.length === 0;
   $("#my-list").innerHTML = list
     .map((b) => `<button type="button" class="my-item" data-id="${esc(b.id)}">
-      <span class="my-name">${esc(b.serviceName)}</span>
+      <span class="my-name">${esc(bookingTitle(b))}</span>
       <span class="my-when">${esc(fmtDate(b.date, { short: true }))} · ${esc(fmtTime(b.time))} · ${esc(b.code)}</span>
       ${pill(b.status)}</button>`)
     .join("");
@@ -589,6 +750,27 @@ function wire() {
   $("#services-list").addEventListener("click", (e) => {
     const b = e.target.closest("[data-service]");
     if (b) startBooking(b.dataset.service);
+  });
+  $("#look-picker").addEventListener("click", (e) => {
+    const card = e.target.closest("[data-look]");
+    if (card) return chooseLook(card.dataset.look);
+    if (e.target.closest("#qty-minus")) return setQty(state.qty - 1);
+    if (e.target.closest("#qty-plus")) return setQty(state.qty + 1);
+    const sw = e.target.closest("[data-switch]");
+    if (sw) {
+      chooseLook(sw.dataset.switch);
+      $(`[data-look="${CSS.escape(sw.dataset.switch)}"]`)?.focus();
+    }
+  });
+  const qtyInput = $("#qty-input");
+  // Typing updates the total as you go; leaving the field tidies the number.
+  qtyInput.addEventListener("input", () => {
+    const n = Number(qtyInput.value);
+    if (qtyInput.value !== "" && Number.isInteger(n) && n >= 1) setQty(n);
+  });
+  qtyInput.addEventListener("change", () => {
+    setQty(Number(qtyInput.value));
+    qtyInput.value = String(state.qty);
   });
   $("#days").addEventListener("click", (e) => {
     const b = e.target.closest(".day");

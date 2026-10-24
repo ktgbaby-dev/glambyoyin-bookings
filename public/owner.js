@@ -1,5 +1,5 @@
 // GLAM BY OYIN bookings: owner desk (mounted at /#owner).
-import { ApiError, api, duration, esc, fmtDate, fmtTime, naira, pill, zonedToEpoch } from "./lib.js";
+import { ApiError, api, bookingTitle, duration, esc, fmtDate, fmtTime, naira, pill, zonedToEpoch } from "./lib.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -215,7 +215,7 @@ function cardHtml(b) {
       <div class="bk-head">
         <div>
           <div class="bk-when">${esc(fmtDate(b.date, { short: true }))} · ${esc(fmtTime(b.time))}</div>
-          <div class="bk-service">${esc(b.serviceName)} · ${esc(duration(b.mins))}</div>
+          <div class="bk-service">${esc(bookingTitle(b))} · ${esc(duration(b.mins))}</div>
         </div>
         ${pill(b.status)}
       </div>
@@ -277,6 +277,8 @@ async function onClick(e) {
   if (action === "signout") return signOut();
   if (action === "add-service") return addServiceRow();
   if (action === "remove-service") return btn.closest(".svc-edit").remove();
+  if (action === "add-look") return addLookRow(btn.closest(".svc-edit"));
+  if (action === "remove-look") return btn.closest(".look-edit").remove();
 
   if (action === "proof") {
     const box = $("[data-proof]", card);
@@ -391,7 +393,50 @@ function settingsHtml() {
     </form>`;
 }
 
+// One look of a service that is booked by look (Bridal Glam). A bundle's minutes are
+// the sum of the looks it includes, so they are shown but not editable.
+function lookRowHtml(look = {}, siblings = []) {
+  const bundle = Array.isArray(look.includes) && look.includes.length;
+  const names = bundle ? look.includes.map((id) => siblings.find((l) => l.id === id)?.name || id).join(" + ") : "";
+  return `<div class="look-edit" data-id="${esc(look.id || "")}" data-includes="${esc(bundle ? look.includes.join(",") : "")}">
+    <div class="field"><label>Look name</label><input type="text" data-lk="name" maxlength="60" value="${esc(look.name || "")}"></div>
+    <div class="row2">
+      <div class="field"><label>Price (₦)</label><input type="number" data-lk="price" min="0" step="500" inputmode="numeric" value="${esc(look.price ?? "")}"></div>
+      <div class="field"><label>Minutes${bundle ? "" : look.perPerson ? " each" : ""}</label><input type="number" data-lk="mins" min="30" max="480" step="30" inputmode="numeric" value="${esc(look.mins ?? 60)}" ${bundle ? "disabled" : ""}></div>
+    </div>
+    ${bundle
+      ? `<p class="hint look-edit-note">Bundle of ${esc(names)}. Its time is the two looks together.</p>`
+      : `<div class="row2">
+          <label class="closed"><input type="checkbox" data-lk="perPerson" ${look.perPerson ? "checked" : ""}> Priced per person</label>
+          <div class="field" ${look.perPerson ? "" : "hidden"}><label>Most people</label><input type="number" data-lk="maxQty" min="2" max="20" step="1" inputmode="numeric" value="${esc(look.maxQty ?? 8)}" ${look.perPerson ? "" : "disabled"}></div>
+        </div>`}
+    <button type="button" class="btn btn-outline btn-danger btn-sm" data-action="remove-look" aria-label="Remove ${esc(look.name || "look")}">Remove look</button>
+  </div>`;
+}
+
+function addLookRow(svcRow) {
+  const list = $(".look-edit-list", svcRow);
+  list.insertAdjacentHTML("beforeend", lookRowHtml({ mins: 60 }));
+  $$(".look-edit input[data-lk=name]", list).at(-1).focus();
+}
+
 function serviceRowHtml(svc = {}) {
+  if (svc.looks?.length) {
+    return `<div class="svc-edit svc-has-looks" data-id="${esc(svc.id || "")}" data-look-title="${esc(svc.lookTitle || "")}">
+      <div class="field"><label>Service name</label><input type="text" data-k="name" maxlength="60" value="${esc(svc.name || "")}"></div>
+      <div class="row2">
+        <div class="field"><label>Category</label>
+          <select data-k="category">${CATEGORIES.map((c) => `<option ${svc.category === c ? "selected" : ""}>${c}</option>`).join("")}</select></div>
+        <div class="field"><button type="button" class="btn btn-outline btn-danger btn-sm btn-block" data-action="remove-service" aria-label="Remove ${esc(svc.name || "service")}">Remove</button></div>
+      </div>
+      <div class="looks-edit">
+        <h4 class="label">Looks</h4>
+        <p class="hint">Clients choose one look per booking. The list shows this service "from" its lowest look price.</p>
+        <div class="look-edit-list">${svc.looks.map((l) => lookRowHtml(l, svc.looks)).join("")}</div>
+        <button type="button" class="btn btn-outline btn-sm" data-action="add-look" style="margin-top:12px">Add a look</button>
+      </div>
+    </div>`;
+  }
   return `<div class="svc-edit" data-id="${esc(svc.id || "")}">
     <div class="field"><label>Service name</label><input type="text" data-k="name" maxlength="60" value="${esc(svc.name || "")}"></div>
     <div class="row2">
@@ -421,8 +466,29 @@ function readSettingsForm() {
   }
   const services = $$(".svc-edit", state.root).map((row) => {
     const get = (k) => $(`[data-k="${k}"]`, row).value;
-    const svc = { name: get("name"), category: get("category"), price: Number(get("price")), mins: Number(get("mins")) };
+    const svc = { name: get("name"), category: get("category") };
     if (row.dataset.id) svc.id = row.dataset.id;
+    if ($(".looks-edit", row)) {
+      svc.lookTitle = row.dataset.lookTitle || "";
+      svc.looks = $$(".look-edit", row).map((lr) => {
+        const lk = (k) => $(`[data-lk="${k}"]`, lr);
+        const look = { name: lk("name").value, price: Number(lk("price").value) };
+        if (lr.dataset.id) look.id = lr.dataset.id;
+        if (lr.dataset.includes) {
+          look.includes = lr.dataset.includes.split(",");
+        } else {
+          look.mins = Number(lk("mins").value);
+          if (lk("perPerson").checked) {
+            look.perPerson = true;
+            look.maxQty = Number(lk("maxQty").value);
+          }
+        }
+        return look;
+      });
+    } else {
+      svc.price = Number(get("price"));
+      svc.mins = Number(get("mins"));
+    }
     return svc;
   });
   return {
@@ -474,6 +540,12 @@ function onSubmit(e) {
 
 // "Closed" ticks disable that day's time inputs.
 document.addEventListener("change", (e) => {
+  const lookRow = e.target.closest?.(".look-edit");
+  if (lookRow && e.target.matches?.("[data-lk=perPerson]")) {
+    const max = $("[data-lk=maxQty]", lookRow);
+    max.disabled = !e.target.checked;
+    max.closest(".field").hidden = !e.target.checked;
+  }
   const row = e.target.closest?.(".hours-row");
   if (row && e.target.type === "checkbox") {
     $$("input[type=time]", row).forEach((t) => { t.disabled = e.target.checked; });

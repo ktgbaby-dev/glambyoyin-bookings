@@ -64,6 +64,24 @@ export function validateBooking(input, settings, nowMs) {
   const service = settings.services.find((s) => s.id === input.serviceId);
   if (!service) throw bad("That service isn't available any more. Please choose again.", "service");
 
+  // A service with looks is booked by choosing one look (and, for per-person
+  // looks, how many people). Price and minutes always come from our settings.
+  let item = service;
+  let lookFields = {};
+  if (service.looks?.length) {
+    const look = service.looks.find((l) => l.id === input.lookId);
+    if (!look) throw bad("Please choose your look.", "look");
+    let qty = 1;
+    if (look.perPerson) {
+      qty = Number(input.qty);
+      if (!Number.isInteger(qty) || qty < 1 || qty > look.maxQty) {
+        throw bad(`Please choose between 1 and ${look.maxQty} people.`, "look");
+      }
+    }
+    item = { price: look.price * qty, mins: look.mins * qty };
+    lookFields = { lookId: look.id, lookName: look.name, qty, unitPrice: look.price };
+  }
+
   const date = String(input.date || "");
   const today = dateInTz(nowMs, settings.tz);
   if (!isValidDate(date)) throw bad("Please choose a day.", "date");
@@ -76,7 +94,7 @@ export function validateBooking(input, settings, nowMs) {
   const time = String(input.time || "");
   if (!TIME_RE.test(time) || toMins(time) % SLOT_STEP !== 0) throw bad("Please choose a time.", "time");
   const start = toMins(time);
-  if (start < toMins(hours.open) || start + service.mins > toMins(hours.close)) {
+  if (start < toMins(hours.open) || start + item.mins > toMins(hours.close)) {
     throw bad("That time falls outside our opening hours.", "time");
   }
   if (zonedToEpoch(date, time, settings.tz) < nowMs + NOTICE_MS) {
@@ -92,18 +110,19 @@ export function validateBooking(input, settings, nowMs) {
   const note = cleanText(input.note ?? "", { max: 300, label: "your note", field: "note" });
   const receipt = cleanReceipt(input.receipt);
 
-  const deposit = depositFor(service.price, settings.depositPct);
+  const deposit = depositFor(item.price, settings.depositPct);
   return {
     receipt,
     fields: {
       serviceId: service.id,
       serviceName: service.name,
       category: service.category,
-      mins: service.mins,
-      price: service.price,
+      ...lookFields,
+      mins: item.mins,
+      price: item.price,
       depositPct: settings.depositPct,
       deposit,
-      balance: service.price - deposit,
+      balance: item.price - deposit,
       date,
       time,
       name,
@@ -170,6 +189,9 @@ export function clientView(b) {
     code: b.code,
     status: b.status,
     serviceName: b.serviceName,
+    lookName: b.lookName ?? null,
+    qty: b.qty ?? null,
+    unitPrice: b.unitPrice ?? null,
     category: b.category,
     mins: b.mins,
     price: b.price,

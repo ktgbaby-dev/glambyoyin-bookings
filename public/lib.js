@@ -13,6 +13,10 @@ export const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ESC
 
 export const naira = (n) => "₦" + Math.round(Number(n) || 0).toLocaleString("en-NG");
 
+// "Bridal Glam: Aso-Ebi / Bridesmaids × 3": the service, then the look and how many people.
+export const bookingTitle = ({ serviceName, lookName, qty }) =>
+  lookName ? `${serviceName}: ${lookName}${qty > 1 ? ` × ${qty}` : ""}` : serviceName;
+
 export function duration(mins) {
   const h = Math.floor(mins / 60);
   const m = mins % 60;

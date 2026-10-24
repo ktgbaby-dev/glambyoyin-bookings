@@ -82,12 +82,32 @@
           </ol>
 
           <div class="step-panel" id="step-1" hidden>
-            <h3 class="step-title">Pick a day and time</h3>
-            <p class="step-help" id="tz-note"></p>
-            <div class="days" id="days" role="group" aria-label="Day"></div>
-            <h4 class="label subhead" id="times-label">Time</h4>
-            <div class="times" id="times" role="group" aria-labelledby="times-label"></div>
-            <p class="times-note" id="times-note" aria-live="polite"></p>
+            <div class="look-picker" id="look-picker" hidden>
+              <h3 class="step-title" id="look-title"></h3>
+              <p class="step-help" id="look-help">Choose one look for this booking, then pick a day and time.</p>
+              <div class="looks looks-featured" id="looks-featured" role="group" aria-labelledby="look-title"></div>
+              <div class="looks" id="looks" role="group" aria-labelledby="look-title"></div>
+              <div class="look-qty" id="look-qty" hidden>
+                <span class="field-label" id="qty-label">Number of people</span>
+                <div class="qty" role="group" aria-labelledby="qty-label">
+                  <button type="button" class="qty-btn" id="qty-minus" aria-label="One fewer person">&minus;</button>
+                  <input type="number" id="qty-input" inputmode="numeric" min="1" step="1" value="1" aria-labelledby="qty-label">
+                  <button type="button" class="qty-btn" id="qty-plus" aria-label="One more person">+</button>
+                </div>
+                <p class="hint" id="qty-hint"></p>
+              </div>
+              <p class="look-hint" id="look-hint" aria-live="polite" hidden></p>
+              <div class="look-total" id="look-total" aria-live="polite" hidden></div>
+              <p class="times-note" id="look-note" aria-live="polite"></p>
+            </div>
+            <div id="when">
+              <h3 class="step-title">Pick a day and time</h3>
+              <p class="step-help" id="tz-note"></p>
+              <div class="days" id="days" role="group" aria-label="Day"></div>
+              <h4 class="label subhead" id="times-label">Time</h4>
+              <div class="times" id="times" role="group" aria-labelledby="times-label"></div>
+              <p class="times-note" id="times-note" aria-live="polite"></p>
+            </div>
             <div class="step-actions">
               <button type="button" class="btn btn-outline" id="s1-cancel">Change service</button>
               <button type="button" class="btn btn-primary" id="s1-next" disabled>Continue</button>
