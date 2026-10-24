@@ -717,3 +717,274 @@ test("the owner can switch full payment off and clients are then refused it", as
   assert.equal((await call(pub.GET)).data.settings.allowFullPayment, true);
   assert.equal((await bookAt(date, open, { serviceId: "soft-glam", payment: "full" })).status, 200);
 });
+
+// ---------- separate logins ----------
+
+const accountApi = await import("../api/account.js");
+const acct = (cookie, body) => call(accountApi.POST, { method: "POST", path: "/api/account", body, cookie });
+const acctGet = (cookie) => call(accountApi.GET, { path: "/api/account", cookie });
+const signInAs = async (username, password) => {
+  const r = await call(auth.POST, { method: "POST", body: { username, password } });
+  return { ...r, cookie: r.headers.get("set-cookie")?.split(";")[0] };
+};
+const deskStatus = async (cookie) => (await call(owner.GET, { path: "/api/owner", cookie })).status;
+
+const TEMP = { oyin: "Temp-pass-for-her-77", ktg: "Temp-pass-for-him-88" };
+async function setupLogins() {
+  const r = await acct(await ownerCookie(), {
+    action: "setup",
+    users: [
+      { name: "Oyin", username: "oyin", role: "member", password: TEMP.oyin },
+      { name: "KTG", username: "ktgbaby", role: "admin", password: TEMP.ktg },
+    ],
+  });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+}
+// Sets up the two logins and has both choose their own password, ready to use.
+async function readyLogins() {
+  await setupLogins();
+  const mine = { oyin: "Her-own-secret-pass-1", ktg: "His-own-secret-pass-2" };
+  const out = {};
+  for (const [key, username] of [["oyin", "oyin"], ["ktg", "ktgbaby"]]) {
+    const s = await signInAs(username, TEMP[key]);
+    assert.equal(s.status, 200);
+    const c = await acct(s.cookie, { action: "change-password", current: TEMP[key], next: mine[key] });
+    assert.equal(c.status, 200, JSON.stringify(c.data));
+    out[key] = { cookie: c.headers.get("set-cookie").split(";")[0], password: mine[key], id: c.data.user.id };
+  }
+  return out;
+}
+
+test("until logins are set up, the one shared password works as before and nothing else does", async () => {
+  const s = await call(auth.GET, {});
+  assert.deepEqual([s.data.owner, s.data.accounts], [false, false]);
+  const cookie = await ownerCookie();
+  const me = await acctGet(cookie);
+  assert.deepEqual([me.status, me.data.me.legacy, me.data.accounts], [200, true, false]);
+  assert.equal((await acct(cookie, { action: "change-password", current: "x", next: "Whatever-1234567" })).status, 409); // nothing to change yet
+  assert.equal((await acct(cookie, { action: "add", name: "A", username: "abc", password: "Whatever-1234567" })).status, 409);
+  assert.equal((await acctGet(undefined)).status, 401);
+});
+
+test("the shared-password session can set up the first logins, once", async () => {
+  const cookie = await ownerCookie();
+  const refuse = async (users, label) => {
+    const r = await acct(cookie, { action: "setup", users });
+    assert.equal(r.status, 400, `${label}: ${JSON.stringify(r.data)}`);
+    return r.data;
+  };
+  const ok = { name: "KTG", username: "ktgbaby", role: "admin", password: "Temp-pass-for-him-88" };
+  await refuse([], "none");
+  await refuse([{ ...ok, role: "member" }], "needs an admin");
+  assert.equal((await refuse([{ ...ok, password: "short" }], "short")).field, "password");
+  assert.equal((await refuse([{ ...ok, password: "aaaaaaaaaaaa" }], "too simple")).field, "password");
+  assert.equal((await refuse([{ ...ok, password: "My-password-12345" }], "common word")).field, "password");
+  assert.equal((await refuse([{ ...ok, password: "ktgbaby-is-great!" }], "contains username")).field, "password");
+  assert.equal((await refuse([{ ...ok, username: "a b" }], "bad username")).field, "username");
+  assert.equal((await refuse([{ ...ok, name: "" }], "no name")).field, "name");
+  assert.equal((await refuse([ok, { ...ok, name: "Other" }], "duplicate username")).field, "username");
+
+  await setupLogins();
+  // the shared-password cookie is finished now, and can't set up again
+  assert.equal(await deskStatus(cookie), 401);
+  assert.equal((await acct(cookie, { action: "setup", users: [ok] })).status, 401);
+  const s = await call(auth.GET, {});
+  assert.deepEqual([s.data.owner, s.data.accounts], [false, true]);
+});
+
+test("signing in with a username: wrong passwords and unknown names get the same slow 401; usernames ignore case", async () => {
+  await setupLogins();
+  const timed = async (u, p) => { const t0 = Date.now(); const r = await signInAs(u, p); return { r, ms: Date.now() - t0 }; };
+  const wrong = await timed("oyin", "not-her-password");
+  const unknown = await timed("nobody", "not-her-password");
+  const none = await timed("", "");
+  for (const x of [wrong, unknown, none]) {
+    assert.equal(x.r.status, 401);
+    assert.ok(x.ms >= 850, "wrong sign-ins are delayed");
+    assert.equal(x.r.headers.get("set-cookie"), null);
+  }
+  assert.equal(wrong.r.data.message, unknown.r.data.message); // can't tell which usernames exist
+  const ok = await signInAs("  OYIN ", TEMP.oyin);
+  assert.equal(ok.status, 200);
+  assert.deepEqual([ok.data.user.username, ok.data.user.name, ok.data.user.role, ok.data.user.mustChange], ["oyin", "Oyin", "member", true]);
+  assert.ok(!JSON.stringify(ok.data).includes("hash") && !JSON.stringify(ok.data).includes("scrypt"), "no password hash is ever sent");
+  const cookie = ok.headers.get("set-cookie");
+  for (const attr of ["HttpOnly", "Secure", "SameSite=Lax", "Path=/"]) assert.ok(cookie.includes(attr), attr);
+});
+
+test("a temporary password has to be changed first; the new password then works and the old one doesn't", async () => {
+  await setupLogins();
+  const s = await signInAs("oyin", TEMP.oyin);
+  const locked = await call(owner.GET, { path: "/api/owner", cookie: s.cookie });
+  assert.deepEqual([locked.status, locked.data.error], [403, "must_change"]);
+  assert.equal((await call(proof.GET, { path: "/api/proof?id=abcdefghij1234", cookie: s.cookie })).status, 403);
+  assert.equal((await acctGet(s.cookie)).data.me.mustChange, true); // the account endpoint still answers
+
+  const tryChange = async (current, next) => acct(s.cookie, { action: "change-password", current, next });
+  const wrongCurrent = await tryChange("not-my-password", "Her-own-secret-pass-1");
+  assert.deepEqual([wrongCurrent.status, wrongCurrent.data.field], [400, "current"]);
+  assert.deepEqual([(await tryChange(TEMP.oyin, "short")).data.field], ["next"]);
+  assert.equal((await tryChange(TEMP.oyin, TEMP.oyin)).status, 400); // must be different
+  assert.equal((await tryChange(TEMP.oyin, "oyin-oyin-oyin-1")).status, 400); // contains the username
+  assert.equal(await deskStatus(s.cookie), 403); // refused attempts changed nothing
+
+  const done = await tryChange(TEMP.oyin, "Her-own-secret-pass-1");
+  assert.equal(done.status, 200);
+  assert.equal(done.data.user.mustChange, false);
+  const fresh = done.headers.get("set-cookie").split(";")[0];
+  assert.equal(await deskStatus(fresh), 200); // this session carries on, now unlocked
+  assert.equal(await deskStatus(s.cookie), 401); // the pre-change cookie no longer counts
+  assert.equal((await signInAs("oyin", TEMP.oyin)).status, 401);
+  assert.equal((await signInAs("oyin", "Her-own-secret-pass-1")).status, 200);
+});
+
+test("changing your password ends your other sessions (phones, laptops) but not the one you're using", async () => {
+  const { oyin } = await readyLogins();
+  const other = await signInAs("oyin", oyin.password);
+  assert.equal(await deskStatus(other.cookie), 200);
+  const r = await acct(oyin.cookie, { action: "change-password", current: oyin.password, next: "Her-newer-secret-pass-9" });
+  assert.equal(r.status, 200);
+  assert.equal(await deskStatus(other.cookie), 401);
+  assert.equal(await deskStatus(oyin.cookie), 401); // the cookie used for the change is replaced by the one in the response
+  assert.equal(await deskStatus(r.headers.get("set-cookie").split(";")[0]), 200);
+});
+
+test("'sign out other devices' ends the other sessions and keeps this one", async () => {
+  const { oyin } = await readyLogins();
+  const phone = await signInAs("oyin", oyin.password);
+  const laptop = await signInAs("oyin", oyin.password);
+  const r = await acct(laptop.cookie, { action: "sign-out-others" });
+  assert.equal(r.status, 200);
+  assert.equal(await deskStatus(phone.cookie), 401);
+  assert.equal(await deskStatus(oyin.cookie), 401);
+  assert.equal(await deskStatus(r.headers.get("set-cookie").split(";")[0]), 200);
+});
+
+test("only a login that manages logins can add, reset or remove logins; members see no list", async () => {
+  const { oyin, ktg } = await readyLogins();
+  const member = await acctGet(oyin.cookie);
+  assert.deepEqual([member.status, member.data.me.role, member.data.users], [200, "member", undefined]);
+  const admin = await acctGet(ktg.cookie);
+  assert.deepEqual(admin.data.users.map((u) => u.username).sort(), ["ktgbaby", "oyin"]);
+  assert.ok(!JSON.stringify(admin.data).includes("scrypt"), "no hashes in the list");
+
+  const newUser = { action: "add", name: "Ada", username: "ada", password: "Temp-pass-for-new-55", role: "member" };
+  assert.equal((await acct(oyin.cookie, newUser)).status, 403);
+  assert.equal((await acct(oyin.cookie, { action: "reset", id: ktg.id, password: "Takeover-pass-123" })).status, 403);
+  assert.equal((await acct(oyin.cookie, { action: "remove", id: ktg.id })).status, 403);
+
+  assert.equal((await acct(ktg.cookie, newUser)).status, 200);
+  assert.equal((await acct(ktg.cookie, newUser)).data.field, "username"); // already taken
+  assert.equal((await acct(ktg.cookie, { ...newUser, username: "ada2", password: "short" })).data.field, "password");
+  assert.equal((await acct(ktg.cookie, { ...newUser, username: "Bad Name" })).data.field, "username");
+  // the new login starts on a temporary password
+  const ada = await signInAs("ada", "Temp-pass-for-new-55");
+  assert.equal(ada.status, 200);
+  assert.equal(await deskStatus(ada.cookie), 403);
+  // and cannot manage logins even if asked to
+  assert.equal((await acct(ada.cookie, newUser)).status, 403);
+});
+
+test("an admin can reset a password: that login has to choose its own again, and its old sessions end", async () => {
+  const { oyin, ktg } = await readyLogins();
+  const r = await acct(ktg.cookie, { action: "reset", id: oyin.id, password: "Reset-by-ktg-4321" });
+  assert.equal(r.status, 200);
+  assert.equal(r.data.user.mustChange, true);
+  assert.equal(await deskStatus(oyin.cookie), 401); // her session ended
+  assert.equal((await signInAs("oyin", oyin.password)).status, 401); // her old password is gone
+  const back = await signInAs("oyin", "Reset-by-ktg-4321");
+  assert.equal(back.status, 200);
+  assert.equal(await deskStatus(back.cookie), 403); // must choose her own first
+  assert.equal(await deskStatus(ktg.cookie), 200); // the admin's own session is untouched
+  assert.equal((await acct(ktg.cookie, { action: "reset", id: oyin.id, password: "weak" })).data.field, "password");
+  assert.equal((await acct(ktg.cookie, { action: "reset", id: "uDoesNotExist1", password: "Reset-by-ktg-4321" })).status, 404);
+});
+
+test("an admin resetting their own password keeps their session and isn't forced to change it again", async () => {
+  const { ktg } = await readyLogins();
+  const r = await acct(ktg.cookie, { action: "reset", id: ktg.id, password: "Ktg-reset-myself-3" });
+  assert.deepEqual([r.status, r.data.user.mustChange], [200, false]);
+  assert.equal(await deskStatus(r.headers.get("set-cookie").split(";")[0]), 200);
+  assert.equal((await signInAs("ktgbaby", "Ktg-reset-myself-3")).status, 200);
+});
+
+test("removing a login ends its sessions; you can't remove yourself", async () => {
+  const { oyin, ktg } = await readyLogins();
+  assert.equal((await acct(ktg.cookie, { action: "remove", id: ktg.id })).status, 400);
+  assert.equal((await acct(ktg.cookie, { action: "remove", id: oyin.id })).status, 200);
+  assert.equal(await deskStatus(oyin.cookie), 401);
+  assert.equal((await signInAs("oyin", oyin.password)).status, 401);
+  assert.deepEqual((await acctGet(ktg.cookie)).data.users.map((u) => u.username), ["ktgbaby"]);
+  assert.equal((await acct(ktg.cookie, { action: "remove", id: oyin.id })).status, 404);
+});
+
+test("the site password is a recovery key for admin logins only", async () => {
+  const { oyin } = await readyLogins();
+  const admin = await signInAs("ktgbaby", process.env.OWNER_PASSWORD);
+  assert.equal(admin.status, 200);
+  assert.equal(await deskStatus(admin.cookie), 200);
+  assert.equal((await signInAs("oyin", process.env.OWNER_PASSWORD)).status, 401); // not for a member
+  assert.equal((await signInAs("", process.env.OWNER_PASSWORD)).status, 401); // and not without a username
+  // it can set a new password for the admin's own login, so a forgotten password is fixable
+  const me = (await acctGet(admin.cookie)).data.me;
+  const reset = await acct(admin.cookie, { action: "reset", id: me.id, password: "Brand-new-secret-8" });
+  assert.equal(reset.status, 200);
+  assert.equal((await signInAs("ktgbaby", "Brand-new-secret-8")).status, 200);
+  assert.equal(await deskStatus(oyin.cookie), 200); // other logins were not disturbed
+  // with no site password configured, recovery is simply off
+  const saved = process.env.OWNER_PASSWORD;
+  delete process.env.OWNER_PASSWORD;
+  assert.equal((await signInAs("ktgbaby", "Brand-new-secret-8")).status, 200);
+  assert.equal((await signInAs("ktgbaby", saved)).status, 401);
+  process.env.OWNER_PASSWORD = saved;
+});
+
+test("forged login cookies don't work", async () => {
+  const { oyin } = await readyLogins();
+  const [name, value] = oyin.cookie.split("=");
+  const [v, id, expiry, version, mac] = value.split(".");
+  const get = (cookie) => deskStatus(`${name}=${cookie}`);
+  assert.equal(await get(value), 200);
+  assert.equal(await get([v, id, expiry, version, mac.slice(0, -1) + (mac.endsWith("0") ? "1" : "0")].join(".")), 401); // tampered signature
+  assert.equal(await get([v, id, Number(expiry) + 99999, version, mac].join(".")), 401); // later expiry
+  assert.equal(await get([v, id, expiry, Number(version) + 1, mac].join(".")), 401); // newer session version
+  assert.equal(await get([v, "uSomeoneElse1", expiry, version, mac].join(".")), 401); // another user id
+  assert.equal(await get([v, id, expiry, version].join(".")), 401);
+  assert.equal(await get(`${v}.${id}.${expiry}`), 401);
+  // correctly signed, but for a login that doesn't exist / has expired
+  const { createHmac } = await import("node:crypto");
+  const signed = (payload) => `${payload}.${createHmac("sha256", process.env.SESSION_SECRET).update(payload).digest("hex")}`;
+  assert.equal(await get(signed(`v2.uGhost000001.${Math.floor(Date.now() / 1000) + 1000}.0`)), 401);
+  assert.equal(await get(signed(`v2.${id}.${Math.floor(Date.now() / 1000) - 10}.${version}`)), 401);
+  // an old shared-password cookie is worthless once logins exist
+  const legacySig = createHmac("sha256", process.env.SESSION_SECRET).update(String(Math.floor(Date.now() / 1000) + 1000)).digest("hex");
+  assert.equal(await get(`${Math.floor(Date.now() / 1000) + 1000}.${legacySig}`), 401);
+});
+
+test("with logins in place the studio desk still does its job", async () => {
+  const { oyin } = await readyLogins();
+  const { date, open } = await bookable(1);
+  const b = (await bookAt(date, open, { receipt: receipt(2000) })).data.booking;
+  const list = await call(owner.GET, { path: "/api/owner", cookie: oyin.cookie });
+  assert.equal(list.status, 200);
+  assert.ok(list.data.bookings.some((x) => x.id === b.id));
+  const confirmed = await call(owner.POST, { method: "POST", path: "/api/owner", cookie: oyin.cookie, body: { action: "status", id: b.id, status: "confirmed" } });
+  assert.equal(confirmed.status, 200);
+  assert.equal((await call(proof.GET, { path: `/api/proof?id=${b.id}`, cookie: oyin.cookie })).status, 200);
+  assert.equal((await call(owner.GET, { path: "/api/owner" })).status, 401); // visitors still can't
+  assert.equal((await call(auth.DELETE, { method: "DELETE", cookie: oyin.cookie })).headers.get("set-cookie").includes("Max-Age=0"), true);
+});
+
+test("an admin can reset their own password and ask to be made to choose a new one at next sign-in", async () => {
+  const { ktg } = await readyLogins();
+  const r = await acct(ktg.cookie, { action: "reset", id: ktg.id, password: "Handed-over-temp-55", mustChange: true });
+  assert.deepEqual([r.status, r.data.user.mustChange], [200, true]);
+  const cookie = r.headers.get("set-cookie").split(";")[0];
+  assert.equal(await deskStatus(cookie), 403); // locked until they choose their own
+  assert.equal((await acct(cookie, { action: "add", name: "X", username: "xyz", password: "Another-temp-pass-3" })).status, 403);
+  assert.equal((await signInAs("ktgbaby", "Handed-over-temp-55")).data.user.mustChange, true);
+  assert.equal((await signInAs("ktgbaby", ktg.password)).status, 401);
+  // and a reset without the flag never forces a change on yourself
+  const done = await acct(cookie, { action: "change-password", current: "Handed-over-temp-55", next: "My-final-secret-pass-6" });
+  assert.equal(done.status, 200);
+});

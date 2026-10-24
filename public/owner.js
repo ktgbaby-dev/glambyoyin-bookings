@@ -9,7 +9,12 @@ const DAY_NAMES = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", 
 const CATEGORIES = ["Makeup", "Lashes"];
 const REFRESH_MS = 60_000;
 
-const state = { root: null, bookings: [], settings: null, filter: "action", tab: "bookings", timer: null, proofOpen: new Set(), mounted: false };
+const state = {
+  root: null, bookings: [], settings: null, filter: "action", tab: "bookings", timer: null, proofOpen: new Set(), mounted: false,
+  user: null, // the signed-in login
+  accounts: false, // true once the studio has separate logins (before that: one shared password)
+  users: null, // the list of logins (only for a login that manages logins)
+};
 
 /* ---------------- mount / unmount ---------------- */
 
@@ -23,8 +28,11 @@ export async function mountOwner(root) {
   stopTimer();
   root.innerHTML = `<p class="empty">Loading…</p>`;
   try {
-    const { owner } = await api("/api/auth");
-    if (owner) await loadDesk();
+    const { owner, accounts, user } = await api("/api/auth");
+    state.accounts = accounts;
+    state.user = user;
+    if (owner && user?.mustChange) renderForcedChange();
+    else if (owner) await loadDesk();
     else renderSignIn();
   } catch (err) {
     root.innerHTML = `<p class="empty">${esc(err.message)}</p>`;
@@ -59,6 +67,10 @@ function renderSignIn(message = "") {
       <h1>Bookings desk</h1>
       <p>Sign in to see bookings and confirm payments.</p>
       <form id="signin" novalidate>
+        ${state.accounts ? `<div class="field">
+          <label for="owner-user">Username</label>
+          <input type="text" id="owner-user" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        </div>` : ""}
         <div class="field">
           <label for="owner-pw">Password</label>
           <input type="password" id="owner-pw" autocomplete="current-password" required>
@@ -67,7 +79,7 @@ function renderSignIn(message = "") {
         <button type="submit" class="btn btn-primary btn-block" style="margin-top:18px">Sign in</button>
       </form>
     </div>`;
-  $("#owner-pw").focus();
+  ($("#owner-user") || $("#owner-pw")).focus();
 }
 
 async function signIn(form) {
@@ -77,8 +89,11 @@ async function signIn(form) {
   btn.disabled = true;
   btn.textContent = "Signing in…";
   try {
-    await api("/api/auth", { method: "POST", body: { password: $("#owner-pw").value } });
-    await loadDesk();
+    const res = await api("/api/auth", { method: "POST", body: { username: $("#owner-user")?.value ?? "", password: $("#owner-pw").value } });
+    state.accounts = res.accounts;
+    state.user = res.user;
+    if (res.user?.mustChange) renderForcedChange();
+    else await loadDesk();
   } catch (e) {
     err.textContent = e.message;
     err.hidden = false;
@@ -92,6 +107,9 @@ async function signOut() {
   try { await api("/api/auth", { method: "DELETE" }); } catch { /* signing out locally anyway */ }
   state.bookings = [];
   state.settings = null;
+  state.user = null;
+  state.users = null;
+  state.tab = "bookings";
   renderSignIn();
 }
 
@@ -111,6 +129,7 @@ async function refresh({ quiet = false, first = false } = {}) {
     else renderNoticeOnly();
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) return renderSignIn("Your session has ended. Please sign in again.");
+    if (err instanceof ApiError && err.code === "must_change") return renderForcedChange();
     if (!quiet) flash(err.message, true);
   }
 }
@@ -155,6 +174,7 @@ function renderDesk() {
     <div class="desk-head">
       <h1>Bookings desk</h1>
       <div class="desk-tools">
+        ${state.accounts && state.user ? `<span class="signed-in">${esc(state.user.name)}</span>` : ""}
         <button type="button" class="btn btn-outline btn-sm" data-action="refresh">Refresh</button>
         <button type="button" class="text-btn" data-action="signout">Sign out</button>
       </div>
@@ -163,10 +183,12 @@ function renderDesk() {
     <div class="tabs" role="tablist">
       <button type="button" class="tab" role="tab" data-tab="bookings" aria-selected="${state.tab === "bookings"}">Bookings</button>
       <button type="button" class="tab" role="tab" data-tab="settings" aria-selected="${state.tab === "settings"}">Settings</button>
+      ${state.accounts ? `<button type="button" class="tab" role="tab" data-tab="account" aria-selected="${state.tab === "account"}">Account</button>` : ""}
     </div>
     <p id="desk-msg" class="save-msg" role="status" aria-live="polite"></p>
-    <div id="panel">${state.tab === "bookings" ? bookingsHtml() : settingsHtml()}</div>`;
+    <div id="panel">${state.tab === "bookings" ? bookingsHtml() : state.tab === "account" ? accountHtml() : settingsHtml()}</div>`;
   if (state.tab === "bookings") restoreProofs();
+  if (state.tab === "account") loadLogins();
   scrollTo({ top: keepScroll, behavior: "instant" }); // the page is smooth-scrolling; a refresh shouldn't slide
 }
 
@@ -279,6 +301,10 @@ async function onClick(e) {
   if (action === "signout") return signOut();
   if (action === "add-service") return addServiceRow();
   if (action === "remove-service") return btn.closest(".svc-edit").remove();
+  if (action === "gen-pw") return fillGenerated(btn);
+  if (action === "reset-open") return openReset(btn);
+  if (action === "remove-login") return removeLogin(btn);
+  if (action === "sign-out-others") return signOutOthers(btn);
   if (action === "add-look") return addLookRow(btn.closest(".svc-edit"));
   if (action === "remove-look") return btn.closest(".look-edit").remove();
 
@@ -545,11 +571,289 @@ async function saveSettings() {
   }
 }
 
+/* ---------------- logins and passwords ---------------- */
+
+const PW_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+function generatePassword() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const chars = [...bytes].map((b) => PW_ALPHABET[b % PW_ALPHABET.length]);
+  return [0, 4, 8, 12].map((i) => chars.slice(i, i + 4).join("")).join("-");
+}
+
+// A temporary password has to be replaced by the person's own before anything else.
+function renderForcedChange(message = "") {
+  stopTimer();
+  state.root.innerHTML = `
+    <div class="signin">
+      <span class="eyebrow">Hello, ${esc(state.user?.name || "there")}</span>
+      <h1>Choose your own password</h1>
+      <p>You signed in with a temporary password. Choose one that only you know, at least 10 characters.</p>
+      <form id="forced-pw" novalidate>
+        ${pwFields({ currentLabel: "Temporary password" })}
+        <p class="form-error" role="alert" ${message ? "" : "hidden"}>${esc(message)}</p>
+        <button type="submit" class="btn btn-primary btn-block" style="margin-top:18px">Save and continue</button>
+        <p style="margin-top:16px;text-align:center"><button type="button" class="text-btn" data-action="signout">Sign out</button></p>
+      </form>
+    </div>`;
+  $("#pw-current").focus();
+}
+
+function pwFields({ currentLabel = "Current password" } = {}) {
+  return `
+    <div class="field"><label for="pw-current">${currentLabel}</label>
+      <input type="password" id="pw-current" name="current" autocomplete="current-password" required></div>
+    <div class="field"><label for="pw-next">New password</label>
+      <input type="password" id="pw-next" name="next" autocomplete="new-password" required>
+      <p class="hint">At least 10 characters. Avoid your name, the studio name and common words.</p></div>
+    <div class="field"><label for="pw-confirm">New password again</label>
+      <input type="password" id="pw-confirm" name="confirm" autocomplete="new-password" required></div>`;
+}
+
+function formError(form, message, field) {
+  const box = $(".form-error, .save-msg", form);
+  if (box) {
+    box.textContent = message;
+    box.className = box.classList.contains("save-msg") ? "save-msg err" : "form-error";
+    box.hidden = !message;
+  }
+  const input = field && $(`[name="${field}"]`, form);
+  if (input) input.focus();
+}
+
+async function changePassword(form) {
+  const forced = form.id === "forced-pw";
+  const val = (name) => $(`[name="${name}"]`, form).value;
+  const btn = $("button[type=submit]", form);
+  formError(form, "");
+  if (val("next") !== val("confirm")) return formError(form, "The two new passwords don't match.", "confirm");
+  btn.disabled = true;
+  try {
+    const { user } = await api("/api/account", { method: "POST", body: { action: "change-password", current: val("current"), next: val("next") } });
+    state.user = user;
+    if (forced) return await loadDesk();
+    form.reset();
+    const msg = $(".save-msg", form);
+    msg.className = "save-msg ok";
+    msg.textContent = "Password changed. Any other phone or computer signed in with this login has been signed out.";
+    msg.hidden = false;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) return renderSignIn("Your session has ended. Please sign in again.");
+    formError(form, err.message, err.field === "next" ? "next" : err.field === "current" ? "current" : "");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function signOutOthers(btn) {
+  const msg = $("#others-msg", state.root);
+  btn.disabled = true;
+  try {
+    await api("/api/account", { method: "POST", body: { action: "sign-out-others" } });
+    msg.className = "save-msg ok";
+    msg.textContent = "Done. You're still signed in here; every other device has been signed out.";
+  } catch (err) {
+    msg.className = "save-msg err";
+    msg.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function accountHtml() {
+  const u = state.user;
+  return `
+    <form class="settings-form" id="change-pw" novalidate>
+      <fieldset>
+        <legend>Your login</legend>
+        <p class="hint" style="margin-bottom:14px">Signed in as <strong>${esc(u.name)}</strong> (username <strong>${esc(u.username)}</strong>).</p>
+        ${pwFields()}
+        <div class="save-bar">
+          <button type="submit" class="btn btn-primary">Change password</button>
+          <span class="save-msg" role="status" aria-live="polite" hidden></span>
+        </div>
+      </fieldset>
+    </form>
+    <div class="settings-form"><fieldset>
+      <legend>Other devices</legend>
+      <p class="hint">Lost a phone, or signed in on a shared computer? This signs out every other device that is using your login.</p>
+      <div class="save-bar" style="margin-top:12px">
+        <button type="button" class="btn btn-outline btn-sm" data-action="sign-out-others">Sign out other devices</button>
+        <span class="save-msg" id="others-msg" role="status" aria-live="polite"></span>
+      </div>
+    </fieldset></div>
+    <div id="logins">${u.role === "admin" ? `<p class="empty">Loading logins…</p>` : ""}</div>`;
+}
+
+async function loadLogins() {
+  if (state.user?.role !== "admin") return;
+  try {
+    const data = await api("/api/account");
+    state.users = data.users || [];
+    const box = $("#logins", state.root);
+    if (box) box.innerHTML = loginsHtml();
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) return renderSignIn("Your session has ended. Please sign in again.");
+    const box = $("#logins", state.root);
+    if (box) box.innerHTML = `<p class="empty">${esc(err.message)}</p>`;
+  }
+}
+
+function loginsHtml() {
+  const me = state.user;
+  const rows = state.users
+    .map((u) => `
+      <li class="login-row" data-uid="${esc(u.id)}">
+        <div class="login-who">
+          <strong>${esc(u.name)}</strong>${u.id === me.id ? ` <span class="tag">you</span>` : ""}
+          <span class="hint">${esc(u.username)} · ${u.role === "admin" ? "manages logins" : "studio login"}${u.mustChange ? " · still on a temporary password" : ""}</span>
+        </div>
+        <div class="login-actions">
+          <button type="button" class="btn btn-outline btn-sm" data-action="reset-open" data-uid="${esc(u.id)}">Reset password</button>
+          ${u.id === me.id ? "" : `<button type="button" class="btn btn-outline btn-danger btn-sm" data-action="remove-login" data-uid="${esc(u.id)}" data-name="${esc(u.name)}">Remove</button>`}
+        </div>
+        <form class="login-reset" data-uid="${esc(u.id)}" novalidate hidden>
+          <div class="field"><label>New ${u.id === me.id ? "" : "temporary "}password for ${esc(u.name)}</label>
+            <input type="text" name="password" autocomplete="off" autocapitalize="none" spellcheck="false">
+            <p class="hint">${u.id === me.id ? "This becomes your password straight away." : `${esc(u.name)} will be asked to choose their own the next time they sign in.`}</p></div>
+          <div class="save-bar">
+            <button type="button" class="btn btn-outline btn-sm" data-action="gen-pw">Generate one</button>
+            <button type="submit" class="btn btn-primary btn-sm">Save new password</button>
+          </div>
+          <p class="save-msg" role="status" aria-live="polite" hidden></p>
+        </form>
+      </li>`)
+    .join("");
+  return `
+    <div class="settings-form"><fieldset>
+      <legend>Logins</legend>
+      <ul class="logins">${rows}</ul>
+    </fieldset></div>
+    <form class="settings-form" id="add-login" novalidate>
+      <fieldset>
+        <legend>Add a login</legend>
+        <div class="grid2">
+          <div class="field"><label for="al-name">Name</label><input type="text" id="al-name" name="name" maxlength="60" autocomplete="off"></div>
+          <div class="field"><label for="al-user">Username</label><input type="text" id="al-user" name="username" maxlength="32" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+        </div>
+        <div class="field"><label for="al-pass">Temporary password</label>
+          <input type="text" id="al-pass" name="password" autocomplete="off" autocapitalize="none" spellcheck="false">
+          <p class="hint">They choose their own the first time they sign in. Tap Generate, then send it to them privately.</p></div>
+        <div class="confirm-box">
+          <input type="checkbox" id="al-admin" name="admin">
+          <label for="al-admin">Can manage logins (add, reset and remove other logins).</label>
+        </div>
+        <div class="save-bar">
+          <button type="button" class="btn btn-outline btn-sm" data-action="gen-pw">Generate one</button>
+          <button type="submit" class="btn btn-primary">Add login</button>
+          <span class="save-msg" role="status" aria-live="polite" hidden></span>
+        </div>
+      </fieldset>
+    </form>`;
+}
+
+function fillGenerated(btn) {
+  const form = btn.closest("form");
+  const input = $("[name=password]", form);
+  input.value = generatePassword();
+  input.focus();
+  input.select();
+}
+
+function openReset(btn) {
+  const form = $(`.login-reset[data-uid="${CSS.escape(btn.dataset.uid)}"]`, state.root);
+  form.hidden = !form.hidden;
+  if (!form.hidden) $("[name=password]", form).focus();
+}
+
+function say(form, text, ok) {
+  const el = $(".save-msg", form);
+  el.className = `save-msg ${ok ? "ok" : "err"}`;
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+async function resetLogin(form) {
+  const uid = form.dataset.uid;
+  const password = $("[name=password]", form).value;
+  const btn = $("button[type=submit]", form);
+  say(form, "", true);
+  btn.disabled = true;
+  try {
+    const { user } = await api("/api/account", { method: "POST", body: { action: "reset", id: uid, password } });
+    if (uid === state.user.id) state.user = user;
+    await loadLogins();
+    const again = $(`.login-reset[data-uid="${CSS.escape(uid)}"]`, state.root);
+    again.hidden = false;
+    $("[name=password]", again).value = password;
+    say(again, uid === state.user.id ? "Your password has been changed." : `Saved. Send ${user.name} this temporary password: ${password}. They will choose their own when they sign in.`, true);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) return renderSignIn("Your session has ended. Please sign in again.");
+    say(form, err.message, false);
+    btn.disabled = false;
+  }
+}
+
+async function addLogin(form) {
+  const val = (name) => $(`[name="${name}"]`, form).value;
+  const btn = $("button[type=submit]", form);
+  say(form, "", true);
+  btn.disabled = true;
+  try {
+    const body = { action: "add", name: val("name"), username: val("username"), password: val("password"), role: $("[name=admin]", form).checked ? "admin" : "member" };
+    const { user } = await api("/api/account", { method: "POST", body });
+    await loadLogins();
+    const box = $("#add-login", state.root);
+    say(box, `Added ${user.name}. Send them the username “${user.username}” and this temporary password: ${body.password}. They will choose their own when they first sign in.`, true);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) return renderSignIn("Your session has ended. Please sign in again.");
+    say(form, err.message, false);
+    const bad = err.field && $(`[name="${err.field}"]`, form);
+    if (bad) bad.focus();
+    btn.disabled = false;
+  }
+}
+
+async function removeLogin(btn) {
+  // Two taps, inline, like deleting a booking.
+  if (btn.dataset.armed !== "1") {
+    btn.dataset.armed = "1";
+    btn.textContent = `Tap again to remove ${btn.dataset.name}`;
+    clearTimeout(btn._reset);
+    btn._reset = setTimeout(() => { btn.dataset.armed = "0"; btn.textContent = "Remove"; }, 4000);
+    return;
+  }
+  clearTimeout(btn._reset);
+  btn.disabled = true;
+  try {
+    await api("/api/account", { method: "POST", body: { action: "remove", id: btn.dataset.uid } });
+    await loadLogins();
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) return renderSignIn("Your session has ended. Please sign in again.");
+    btn.disabled = false;
+    btn.dataset.armed = "0";
+    btn.textContent = "Remove";
+    alertInline(btn, err.message);
+  }
+}
+
+function alertInline(btn, message) {
+  const row = btn.closest(".login-row");
+  let el = $(".login-error", row);
+  if (!el) {
+    row.insertAdjacentHTML("beforeend", `<p class="form-error login-error" role="alert"></p>`);
+    el = $(".login-error", row);
+  }
+  el.textContent = message;
+}
+
 /* ---------------- forms ---------------- */
 
 function onSubmit(e) {
   if (e.target.id === "signin") { e.preventDefault(); signIn(e.target); }
   if (e.target.id === "settings-form") { e.preventDefault(); saveSettings(); }
+  if (e.target.id === "change-pw" || e.target.id === "forced-pw") { e.preventDefault(); changePassword(e.target); }
+  if (e.target.id === "add-login") { e.preventDefault(); addLogin(e.target); }
+  if (e.target.matches(".login-reset")) { e.preventDefault(); resetLogin(e.target); }
 }
 
 // "Closed" ticks disable that day's time inputs.

@@ -5,7 +5,7 @@ import { readFile } from "./_lib/store.js";
 
 export function GET(request) {
   return handle(request, ["GET"], async () => {
-    requireOwner(request);
+    await requireOwner(request);
     const id = query(request).get("id") || "";
     if (!ID_RE.test(id)) throw new HttpError(404, "not_found", "No receipt for that booking.");
     const file = await readFile(`proofs/${id}`);

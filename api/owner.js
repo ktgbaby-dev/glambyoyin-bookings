@@ -65,7 +65,7 @@ async function deleteBooking(body) {
 
 export function GET(request) {
   return handle(request, ["GET"], async () => {
-    requireOwner(request);
+    await requireOwner(request);
     const [bookings, settings] = await Promise.all([listBookings(), loadSettings()]);
     return json({ bookings, settings, now: Date.now() });
   });
@@ -73,7 +73,7 @@ export function GET(request) {
 
 export function POST(request) {
   return handle(request, ["POST"], async () => {
-    requireOwner(request);
+    await requireOwner(request);
     requireSameOrigin(request);
     const body = await readJsonBody(request, 60_000);
     switch (body.action) {
