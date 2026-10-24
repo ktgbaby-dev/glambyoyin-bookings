@@ -6,8 +6,8 @@
 
 @font-face {
   font-family: "Bodoni Moda";
-  src: url("../assets/fonts/BodoniModa-Variable.ttf") format("truetype-variations"),
-       url("../assets/fonts/BodoniModa-Variable.ttf") format("truetype");
+  src: url("../assets/fonts/BodoniModa-Variable.woff2") format("woff2-variations"),
+       url("../assets/fonts/BodoniModa-Variable.woff2") format("woff2");
   font-weight: 400 900;
   font-style: normal;
   font-display: swap;
@@ -15,8 +15,8 @@
 
 @font-face {
   font-family: "Bodoni Moda";
-  src: url("../assets/fonts/BodoniModa-Italic-Variable.ttf") format("truetype-variations"),
-       url("../assets/fonts/BodoniModa-Italic-Variable.ttf") format("truetype");
+  src: url("../assets/fonts/BodoniModa-Italic-Variable.woff2") format("woff2-variations"),
+       url("../assets/fonts/BodoniModa-Italic-Variable.woff2") format("woff2");
   font-weight: 400 900;
   font-style: italic;
   font-display: swap;
@@ -24,8 +24,8 @@
 
 @font-face {
   font-family: "Jost";
-  src: url("../assets/fonts/Jost-Variable.ttf") format("truetype-variations"),
-       url("../assets/fonts/Jost-Variable.ttf") format("truetype");
+  src: url("../assets/fonts/Jost-Variable.woff2") format("woff2-variations"),
+       url("../assets/fonts/Jost-Variable.woff2") format("woff2");
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
@@ -33,8 +33,8 @@
 
 @font-face {
   font-family: "Jost";
-  src: url("../assets/fonts/Jost-Italic-Variable.ttf") format("truetype-variations"),
-       url("../assets/fonts/Jost-Italic-Variable.ttf") format("truetype");
+  src: url("../assets/fonts/Jost-Italic-Variable.woff2") format("woff2-variations"),
+       url("../assets/fonts/Jost-Italic-Variable.woff2") format("woff2");
   font-weight: 100 900;
   font-style: italic;
   font-display: swap;
@@ -189,8 +189,8 @@ p { text-wrap: pretty; }
   transition: background-color 0.25s var(--ease-editorial), color 0.25s var(--ease-editorial),
               border-color 0.25s var(--ease-editorial), transform 0.25s var(--ease-editorial);
 }
-.btn-primary { background-color: var(--glam-pink); color: var(--porcelain); border-color: var(--glam-pink); }
-.btn-primary:hover, .btn-primary:focus-visible { background-color: var(--berry); border-color: var(--berry); transform: translateY(-2px); }
+.btn-primary { background-color: var(--glam-pink); color: var(--white); border-color: var(--glam-pink); }
+.btn-primary:hover, .btn-primary:focus-visible { background-color: var(--berry); border-color: var(--berry); color: var(--white); transform: translateY(-2px); }
 .btn-outline { color: inherit; border-color: currentColor; }
 .section-onyx .btn-outline:hover, .section-onyx .btn-outline:focus-visible {
   background-color: var(--porcelain); color: var(--onyx); transform: translateY(-2px);
@@ -279,7 +279,7 @@ p { text-wrap: pretty; }
 }
 .nav-brand { display: flex; align-items: center; min-height: 44px; }
 .nav-logo { height: 28px; width: auto; }
-.nav .btn { color: var(--porcelain); }
+.nav .btn { color: var(--white); }
 .nav-back { color: rgba(251, 246, 243, 0.8); min-height: 44px; display: inline-flex; align-items: center; font-size: 0.72rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.22em; }
 .nav-back:hover { color: var(--porcelain); }
 
@@ -367,6 +367,18 @@ p { text-wrap: pretty; }
 .service-row .btn { grid-column: 2; grid-row: 2; justify-self: end; min-width: 92px; }
 .status-line { color: var(--mink); padding: 18px 0; }
 
+/* Loading shapes: the same boxes as the real facts, chips and service rows, so the page does not jump when the data arrives. */
+html:not(.js) .facts, html:not(.js) .chips, html:not(.js) .skel-list { display: none; }
+.chip.skel { background: var(--petal); border-color: var(--petal); }
+.chips .skel:nth-child(1) { width: 68px; }
+.chips .skel:nth-child(2) { width: 101px; }
+.chips .skel:nth-child(3) { width: 98px; }
+.service-row.skel .service-name, .service-row.skel .service-price, .service-row.skel .service-meta { color: transparent; background: var(--petal); border-radius: 2px; }
+.service-row.skel .service-name { width: 56%; }
+.service-row.skel .service-price { width: 84px; justify-self: end; }
+.service-row.skel .service-meta { width: 38%; }
+.skel-btn { grid-column: 2; grid-row: 2; justify-self: end; width: 92px; min-height: 44px; border: 1px solid var(--line-on-light); border-radius: 2px; }
+
 /* ---------- Booking flow ---------- */
 
 #book { scroll-margin-top: 64px; }
@@ -430,7 +442,7 @@ p { text-wrap: pretty; }
   transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 .time:hover:not([disabled]) { border-color: var(--onyx); }
-.time[aria-pressed="true"] { background: var(--glam-pink); border-color: var(--glam-pink); color: var(--porcelain); }
+.time[aria-pressed="true"] { background: var(--glam-pink); border-color: var(--glam-pink); color: var(--white); }
 .time[disabled] { cursor: not-allowed; color: var(--mink); opacity: 0.55; text-decoration: line-through; background: transparent; }
 .times-note { margin-top: 12px; font-size: 0.88rem; }
 
@@ -471,7 +483,7 @@ p { text-wrap: pretty; }
   transform: translateY(-50%);
   padding: 5px 10px;
   background: var(--glam-pink);
-  color: var(--porcelain);
+  color: var(--white);
   font-size: 0.64rem;
   font-weight: 500;
   letter-spacing: 0.18em;

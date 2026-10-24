@@ -81,6 +81,7 @@ function renderFacts() {
   const facts = $("#facts");
   facts.innerHTML = items.join("");
   facts.hidden = false;
+  facts.removeAttribute("aria-hidden");
 }
 
 function renderServices() {
@@ -88,6 +89,8 @@ function renderServices() {
   const cats = [...new Set(s.services.map((x) => x.category))];
   const chips = $("#chips");
   chips.hidden = cats.length < 2;
+  chips.removeAttribute("aria-hidden");
+  $("#services-list").removeAttribute("aria-busy");
   chips.innerHTML = ["all", ...cats]
     .map((c) => `<button type="button" class="chip" data-cat="${esc(c)}" aria-pressed="${state.category === c}">${c === "all" ? "All" : esc(c)}</button>`)
     .join("");
@@ -942,6 +945,9 @@ async function init() {
       renderMine();
       refreshMine();
     } catch (err) {
+      $("#facts").hidden = true;
+      $("#chips").hidden = true;
+      $("#services-list").removeAttribute("aria-busy");
       $("#services-list").innerHTML = `<p class="status-line">${esc(err.message)}</p><button type="button" class="btn btn-outline btn-sm" id="retry">Try again</button>`;
       $("#retry").addEventListener("click", () => { $("#services-list").innerHTML = `<p class="status-line">Loading services…</p>`; load(); });
       renderMine();

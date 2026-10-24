@@ -20,8 +20,8 @@
 <meta property="og:title" content="Book your look · GLAM BY OYIN">
 <meta property="og:description" content="Makeup and lash appointments in Lagos. Hold your slot with a deposit.">
 
-<link rel="preload" href="assets/fonts/BodoniModa-Variable.ttf" as="font" type="font/ttf" crossorigin>
-<link rel="preload" href="assets/fonts/Jost-Variable.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="preload" href="assets/fonts/BodoniModa-Variable.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/Jost-Variable.woff2" as="font" type="font/woff2" crossorigin>
 <script>document.documentElement.classList.add("js")</script>
 <link rel="stylesheet" href="css/style.css">
 </head>
@@ -54,7 +54,7 @@
         <img src="assets/logos/GLAMBYOYIN_Primary_Reverse_White-Pink.svg" alt="GLAM BY OYIN" class="hero-wordmark reveal" width="737" height="102">
         <h1 class="reveal">Book your <span class="italic-accent">look.</span></h1>
         <p class="hero-sub reveal">Beauty, <span class="italic-accent">taken seriously.</span></p>
-        <ul class="facts reveal" id="facts" hidden></ul>
+        <ul class="facts reveal" id="facts" aria-hidden="true"><li><span class="label">&nbsp;</span>&nbsp;</li><li><span class="label">&nbsp;</span>&nbsp;</li><li><span class="label">&nbsp;</span>&nbsp;</li></ul>
       </div>
     </section>
 
@@ -65,8 +65,19 @@
           <span class="eyebrow">Services</span>
           <h2>Choose your service</h2>
         </div>
-        <div class="chips" id="chips" role="group" aria-label="Filter by category" hidden></div>
-        <div id="services-list" aria-live="polite"><p class="status-line">Loading services…</p></div>
+        <!-- The empty shapes below hold the room the real facts, chips and rows take, so nothing jumps when they arrive. -->
+        <div class="chips" id="chips" role="group" aria-label="Filter by category" aria-hidden="true"><span class="chip skel"></span><span class="chip skel"></span><span class="chip skel"></span></div>
+        <div id="services-list" aria-live="polite" aria-busy="true">
+          <p class="status-line">Loading services…</p>
+          <div class="service-list skel-list" aria-hidden="true">
+            <div class="service-row skel"><span class="service-name">&nbsp;</span><span class="service-price">&nbsp;</span><span class="service-meta">&nbsp;</span><span class="skel-btn"></span></div>
+            <div class="service-row skel"><span class="service-name">&nbsp;</span><span class="service-price">&nbsp;</span><span class="service-meta">&nbsp;</span><span class="skel-btn"></span></div>
+            <div class="service-row skel"><span class="service-name">&nbsp;</span><span class="service-price">&nbsp;</span><span class="service-meta">&nbsp;</span><span class="skel-btn"></span></div>
+            <div class="service-row skel"><span class="service-name">&nbsp;</span><span class="service-price">&nbsp;</span><span class="service-meta">&nbsp;</span><span class="skel-btn"></span></div>
+            <div class="service-row skel"><span class="service-name">&nbsp;</span><span class="service-price">&nbsp;</span><span class="service-meta">&nbsp;</span><span class="skel-btn"></span></div>
+            <div class="service-row skel"><span class="service-name">&nbsp;</span><span class="service-price">&nbsp;</span><span class="service-meta">&nbsp;</span><span class="skel-btn"></span></div>
+          </div>
+        </div>
       </div>
     </section>
 

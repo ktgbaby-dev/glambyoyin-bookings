@@ -382,6 +382,22 @@ await step("sign out returns to the sign-in form; 'Back to site' returns to the 
   check((await O.page.locator("#client:not([hidden])").count()) === 1, "client page should be back");
 });
 
+await step("the page holds still while it loads: layout shift stays under 0.1 even when the data is slow", async () => {
+  const ctx = await browser.newContext(phone);
+  const page = await ctx.newPage();
+  await page.addInitScript(() => {
+    window.__cls = 0;
+    new PerformanceObserver((list) => { for (const e of list.getEntries()) if (!e.hadRecentInput) window.__cls += e.value; }).observe({ type: "layout-shift", buffered: true });
+  });
+  await page.route("**/api/public**", async (route) => { await new Promise((r) => setTimeout(r, 1200)); await route.continue(); });
+  await page.goto(BASE);
+  await page.waitForSelector(".service-row:not(.skel)");
+  await page.waitForTimeout(800);
+  const cls = await page.evaluate(() => window.__cls);
+  check(cls < 0.1, `layout shift was ${cls.toFixed(3)}`);
+  await ctx.close();
+});
+
 await step("no console or page errors anywhere", async () => {
   check(errors.length === 0, errors.join("\n"));
 });
