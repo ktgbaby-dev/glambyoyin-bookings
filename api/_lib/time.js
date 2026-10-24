@@ -38,11 +38,6 @@ export function dateInTz(epochMs, tz) {
   return `${p.y}-${pad(p.m)}-${pad(p.d)}`;
 }
 
-export function minutesInTz(epochMs, tz) {
-  const p = partsInTz(epochMs, tz);
-  return p.hh * 60 + p.mm;
-}
-
 export function isValidDate(dateStr) {
   if (!DATE_RE.test(dateStr)) return false;
   const [y, m, d] = dateStr.split("-").map(Number);

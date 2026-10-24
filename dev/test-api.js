@@ -1179,3 +1179,130 @@ test("sign-in attempts are limited per visitor address: 20 in 10 minutes, then a
   assert.equal((await hit("198.51.100.7")).status, 429);
   assert.equal((await hit("198.51.100.8")).status, 200);
 });
+
+// ---------- booking emails ----------
+
+// Stands in for Resend: records what would have been sent and answers with `answer(call)`.
+async function withResend(answer, fn, { key = "re_test_key", env = {} } = {}) {
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  const saved = { key: process.env.RESEND_API_KEY, to: process.env.NOTIFY_EMAIL };
+  if (key) process.env.RESEND_API_KEY = key; else delete process.env.RESEND_API_KEY;
+  if (env.NOTIFY_EMAIL) process.env.NOTIFY_EMAIL = env.NOTIFY_EMAIL;
+  globalThis.fetch = async (url, init) => {
+    if (!String(url).startsWith("https://api.resend.com")) return realFetch(url, init);
+    const c = { url: String(url), init, body: JSON.parse(init.body) };
+    calls.push(c);
+    return answer(c);
+  };
+  try { return await fn(calls); } finally {
+    globalThis.fetch = realFetch;
+    for (const [name, v] of [["RESEND_API_KEY", saved.key], ["NOTIFY_EMAIL", saved.to]]) { if (v === undefined) delete process.env[name]; else process.env[name] = v; }
+  }
+}
+const resendOk = () => new Response(JSON.stringify({ id: "email_1" }), { status: 200 });
+
+test("with no Resend key nothing is sent and bookings are unaffected", async () => {
+  await withResend(resendOk, async (calls) => {
+    const { date, open } = await bookable(1);
+    assert.equal((await bookAt(date, open)).status, 200);
+    assert.equal(calls.length, 0);
+  }, { key: null });
+});
+
+test("a new booking emails the studio address with everything needed to act on it", async () => {
+  await withResend(resendOk, async (calls) => {
+    const { date, open } = await bookable(1);
+    const r = await bookAt(date, open, { serviceId: "bridal-glam", lookId: "aso-ebi", qty: 3, note: "Wedding on the island" });
+    assert.equal(r.status, 200);
+    assert.equal(calls.length, 1);
+    const [c] = calls;
+    assert.equal(c.url, "https://api.resend.com/emails");
+    assert.equal(c.init.headers.Authorization, "Bearer re_test_key");
+    assert.deepEqual(c.body.to, [DEFAULT_SETTINGS.email]);
+    assert.match(c.body.from, /GLAM BY OYIN <onboarding@resend\.dev>/);
+    assert.ok(c.body.subject.startsWith("New booking: Bridal Glam: Aso-Ebi / Bridesmaids × 3"), c.body.subject);
+    assert.ok(c.body.subject.includes("Ada Obi"));
+    for (const need of ["Ada Obi (08137500330)", "₦75,000", "balance ₦37,500", `Booking code: ${r.data.booking.code}`, "Wedding on the island", "Open the desk: https://localhost/#owner", "held until"]) {
+      assert.ok(c.body.text.includes(need), `missing "${need}" in:\n${c.body.text}`);
+    }
+    assert.ok(c.body.html.includes('href="https://localhost/#owner"'));
+  });
+});
+
+test("the email says whether a receipt is there, and what was paid when paying in full", async () => {
+  await withResend(resendOk, async (calls) => {
+    const { date, open } = await bookable(1);
+    await bookAt(date, open, { receipt: receipt(2000), payment: "full" });
+    assert.ok(calls[0].body.text.includes("Receipt: Receipt uploaded"));
+    assert.ok(calls[0].body.text.includes("Paying now: ₦25,000 in full"));
+    assert.ok(!calls[0].body.text.includes("held until"));
+  });
+});
+
+test("clients' words can't inject markup into the email", async () => {
+  await withResend(resendOk, async (calls) => {
+    const { date, open } = await bookable(1);
+    await bookAt(date, open, { name: "<script>alert(1)</script> Eve", note: `"><img src=x onerror=alert(1)>` });
+    const html = calls[0].body.html;
+    assert.ok(!html.includes("<script>") && !html.includes("<img"), html);
+    assert.ok(html.includes("&lt;script&gt;"));
+  });
+});
+
+test("recipients: NOTIFY_EMAIL wins and may list several; bad addresses are dropped; the Settings switch turns it off", async () => {
+  const { recipients } = await import("../api/_lib/notify.js");
+  const saved = process.env.NOTIFY_EMAIL;
+  try {
+    delete process.env.NOTIFY_EMAIL;
+    assert.deepEqual(recipients({ email: "studio@example.com" }), ["studio@example.com"]);
+    assert.deepEqual(recipients({ email: "not an email" }), []);
+    process.env.NOTIFY_EMAIL = "a@example.com, b@example.com ,nope, c@example.com";
+    assert.deepEqual(recipients({ email: "studio@example.com" }), ["a@example.com", "b@example.com", "c@example.com"]);
+  } finally {
+    if (saved === undefined) delete process.env.NOTIFY_EMAIL; else process.env.NOTIFY_EMAIL = saved;
+  }
+  await withResend(resendOk, async (calls) => {
+    const cookie = await ownerCookie();
+    const cur = (await call(owner.GET, { path: "/api/owner", cookie })).data.settings;
+    assert.equal(cur.notifyNewBookings, true); // on by default
+    assert.equal((await ownerPost(cookie, { action: "settings", settings: { ...cur, notifyNewBookings: false } })).status, 200);
+    const { date, open } = await bookable(1);
+    assert.equal((await bookAt(date, open)).status, 200);
+    assert.equal(calls.length, 0, "switched off in Settings");
+  });
+});
+
+test("if the email service fails, errors out or hangs, the booking is still made and saved", async () => {
+  const { date, open } = await bookable(1);
+  const cookie = await ownerCookie();
+  const errors = [];
+  const realError = console.error;
+  console.error = (...a) => errors.push(a.join(" "));
+  try {
+    // 1. Resend answers 500
+    await withResend(() => new Response("boom", { status: 500 }), async (calls) => {
+      const r = await bookAt(date, open);
+      assert.equal(r.status, 200, JSON.stringify(r.data));
+      assert.equal(calls.length, 1);
+    });
+    // 2. the network call itself throws
+    await withResend(() => { throw new Error("network down"); }, async () => {
+      const r = await bookAt(date, time.fromMins(time.toMins(open) + 120), { name: "Second Booker" });
+      assert.equal(r.status, 200);
+    });
+    // 3. it never answers: the booking waits only a few seconds
+    await withResend((c) => new Promise((_, reject) => c.init.signal.addEventListener("abort", () => reject(c.init.signal.reason))), async () => {
+      const t0 = Date.now();
+      const r = await bookAt(date, time.fromMins(time.toMins(open) + 210), { name: "Third Booker" });
+      assert.equal(r.status, 200);
+      assert.ok(Date.now() - t0 < 6000, `took ${Date.now() - t0} ms`);
+    });
+  } finally {
+    console.error = realError;
+  }
+  const list = (await call(owner.GET, { path: "/api/owner", cookie })).data.bookings;
+  assert.equal(list.length, 3, "all three bookings were saved");
+  assert.ok(errors.some((e) => e.includes("Resend answered 500")), errors.join(" | "));
+  assert.ok(errors.every((e) => !e.includes("re_test_key")), "the key is never logged");
+});

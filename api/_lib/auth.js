@@ -110,9 +110,3 @@ export async function requireOwner(request, { allowMustChange = false } = {}) {
   }
   return user;
 }
-
-export async function requireAdmin(request) {
-  const user = await requireOwner(request);
-  if (user.role !== "admin") throw new HttpError(403, "forbidden", "Only a login that manages logins can do that.");
-  return user;
-}

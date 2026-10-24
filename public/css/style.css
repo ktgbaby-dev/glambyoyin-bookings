@@ -670,7 +670,8 @@ p { text-wrap: pretty; }
 
 .site-footer { background: var(--onyx); color: var(--porcelain); border-top: 1px solid var(--line-on-dark); padding: 44px 0 calc(26px + env(safe-area-inset-bottom)); }
 .footer-top { display: flex; flex-direction: column; gap: 22px; padding-bottom: 30px; border-bottom: 1px solid var(--line-on-dark); }
-.footer-logo { height: 30px; width: auto; margin-bottom: 12px; }
+.footer-brand { display: flex; align-items: center; min-height: 44px; margin-bottom: 0; }
+.footer-logo { height: 30px; width: auto; margin-bottom: 0; }
 .footer-tagline { font-family: var(--font-display); font-style: italic; color: var(--blush); }
 .footer-links { display: flex; flex-wrap: wrap; gap: 0 26px; }
 .footer-links a { display: inline-flex; align-items: center; min-height: 44px; font-size: 0.72rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.22em; color: rgba(251, 246, 243, 0.72); }
