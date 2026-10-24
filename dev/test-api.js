@@ -587,3 +587,55 @@ test("looks survive a settings save, and bad looks are refused", async () => {
   assert.equal(bridalPlain.extra, undefined);
   assert.equal(bridalPlain.price, 80000);
 });
+
+// ---------- open 24 hours ----------
+
+const ALL_DAY = Object.fromEntries(["mon", "tue", "wed", "thu", "fri", "sat", "sun"].map((d) => [d, { open: "00:00", close: "24:00" }]));
+
+test("24:00 is accepted as a closing time and nothing else past 23:59 is", async () => {
+  const { cleanSettings } = await import("../api/_lib/settings.js");
+  const withHours = (hours) => cleanSettings({ ...DEFAULT_SETTINGS, hours });
+  assert.deepEqual(withHours(ALL_DAY).hours, ALL_DAY);
+  assert.deepEqual(withHours({ ...ALL_DAY, mon: null }).hours.mon, null);
+  assert.deepEqual(withHours({ ...ALL_DAY, sat: { open: "23:30", close: "24:00" } }).hours.sat, { open: "23:30", close: "24:00" });
+  const refused = (sat) => assert.throws(() => withHours({ ...ALL_DAY, sat }), (e) => e.status === 400);
+  refused({ open: "24:00", close: "24:00" }); // 24:00 is only ever a closing time
+  refused({ open: "00:00", close: "24:30" });
+  refused({ open: "00:00", close: "25:00" });
+  refused({ open: "23:45", close: "24:00" }); // under 30 minutes open
+});
+
+test("a 24-hour day books from midnight to midnight, and nothing can run past midnight", () => {
+  const s = { ...DEFAULT_SETTINGS, hours: ALL_DAY };
+  const wed = (time, over = {}) => validateBooking({ ...base(), date: "2026-10-28", time, ...over }, s, LOOK_NOW).fields;
+  assert.equal(wed("00:00").time, "00:00");
+  assert.equal(wed("03:30").time, "03:30");
+  assert.equal(wed("22:30").mins, 90); // Soft Glam 90 min ends at 24:00 exactly
+  assert.throws(() => wed("23:00"), (e) => e.status === 400 && e.field === "time"); // would end after midnight
+  assert.equal(wed("23:00", { serviceId: "lash-refill" }).mins, 60); // a 60-minute service ends exactly at midnight
+  assert.throws(() => wed("23:30", { serviceId: "lash-refill" }), (e) => e.status === 400 && e.field === "time");
+  const combo = (time) => validateBooking({ ...base(), serviceId: "bridal-glam", lookId: "wedding-combo", date: "2026-10-28", time }, s, LOOK_NOW).fields;
+  assert.equal(combo("19:00").mins, 300);
+  assert.throws(() => combo("19:30"), (e) => e.status === 400 && e.field === "time");
+  assert.throws(() => wed("24:00"), (e) => e.status === 400 && e.field === "time"); // 24:00 is never a start time
+});
+
+test("the owner can switch to 24/7 and clients can then book at any hour, any day", async () => {
+  const cookie = await ownerCookie();
+  const current = (await call(owner.GET, { path: "/api/owner", cookie })).data.settings;
+  const saved = await ownerPost(cookie, { action: "settings", settings: { ...current, hours: ALL_DAY } });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  const seen = (await call(pub.GET)).data.settings;
+  assert.deepEqual(seen.hours, ALL_DAY);
+
+  // Monday was closed before; midnight to midnight now. 3 am is bookable, and so is the last hour.
+  const today = time.dateInTz(Date.now(), seen.tz);
+  const monday = Array.from({ length: 14 }, (_, i) => time.addDays(today, i + 2)).find((d) => time.weekdayKey(d) === "mon");
+  assert.ok(monday);
+  const early = await bookAt(monday, "03:00", { serviceId: "soft-glam" });
+  assert.equal(early.status, 200, JSON.stringify(early.data));
+  const late = await bookAt(monday, "23:00", { serviceId: "lash-refill" });
+  assert.equal(late.status, 200, JSON.stringify(late.data));
+  const past = await bookAt(monday, "23:30", { serviceId: "lash-refill" });
+  assert.equal(past.status, 400);
+});

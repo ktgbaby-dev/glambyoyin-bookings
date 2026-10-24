@@ -48,12 +48,15 @@ export function fmtDate(s, { short = false } = {}) {
 }
 
 export function fmtTime(t) {
-  const [h, m] = t.split(":").map(Number);
+  const [h24, m] = t.split(":").map(Number);
+  const h = h24 % 24; // "24:00" is midnight at the end of the day
   const suffix = h >= 12 ? "pm" : "am";
   return `${h % 12 || 12}:${pad(m)} ${suffix}`;
 }
 
-export const fmtRange = (a, b) => `${fmtTime(a)} – ${fmtTime(b)}`;
+// A day open from midnight to midnight.
+export const isAllDay = (h) => !!h && h.open === "00:00" && h.close === "24:00";
+export const fmtRange = (a, b) => (a === "00:00" && b === "24:00" ? "Open 24 hours" : `${fmtTime(a)} – ${fmtTime(b)}`);
 
 // ---- studio clock ----
 const fmts = new Map();

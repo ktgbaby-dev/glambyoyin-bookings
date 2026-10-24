@@ -1,5 +1,5 @@
 // GLAM BY OYIN bookings: owner desk (mounted at /#owner).
-import { ApiError, api, bookingTitle, duration, esc, fmtDate, fmtTime, naira, pill, zonedToEpoch } from "./lib.js";
+import { ApiError, api, bookingTitle, duration, esc, fmtDate, fmtTime, isAllDay, naira, pill, zonedToEpoch } from "./lib.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -361,11 +361,16 @@ function settingsHtml() {
         <legend>Opening hours</legend>
         ${DAY_ORDER.map((d) => {
           const h = s.hours[d];
+          const all = isAllDay(h);
           return `<div class="hours-row" data-day="${d}">
             <span class="d">${DAY_NAMES[d]}</span>
-            <div class="field"><input type="time" step="1800" aria-label="${DAY_NAMES[d]} opens" value="${h ? h.open : "09:00"}" ${h ? "" : "disabled"}></div>
-            <div class="field"><input type="time" step="1800" aria-label="${DAY_NAMES[d]} closes" value="${h ? h.close : "18:00"}" ${h ? "" : "disabled"}></div>
-            <label class="closed"><input type="checkbox" ${h ? "" : "checked"}> Closed</label>
+            <div class="field" ${all ? "hidden" : ""}><input type="time" step="1800" aria-label="${DAY_NAMES[d]} opens" value="${h && !all ? h.open : "09:00"}" ${h && !all ? "" : "disabled"}></div>
+            <div class="field" ${all ? "hidden" : ""}><input type="time" step="1800" aria-label="${DAY_NAMES[d]} closes" value="${h && !all ? h.close : "18:00"}" ${h && !all ? "" : "disabled"}></div>
+            <span class="allday-note" ${all ? "" : "hidden"}>Open 24 hours</span>
+            <div class="hours-flags">
+              <label class="closed"><input type="checkbox" data-flag="closed" ${h ? "" : "checked"}> Closed</label>
+              <label class="closed"><input type="checkbox" data-flag="allday" ${all ? "checked" : ""}> Open 24 hours</label>
+            </div>
           </div>`;
         }).join("")}
       </fieldset>
@@ -462,7 +467,9 @@ function readSettingsForm() {
   const hours = {};
   for (const row of $$(".hours-row", state.root)) {
     const [open, close] = $$("input[type=time]", row);
-    hours[row.dataset.day] = $("input[type=checkbox]", row).checked ? null : { open: open.value, close: close.value };
+    if ($("[data-flag=closed]", row).checked) hours[row.dataset.day] = null;
+    else if ($("[data-flag=allday]", row).checked) hours[row.dataset.day] = { open: "00:00", close: "24:00" };
+    else hours[row.dataset.day] = { open: open.value, close: close.value };
   }
   const services = $$(".svc-edit", state.root).map((row) => {
     const get = (k) => $(`[data-k="${k}"]`, row).value;
@@ -547,7 +554,11 @@ document.addEventListener("change", (e) => {
     max.closest(".field").hidden = !e.target.checked;
   }
   const row = e.target.closest?.(".hours-row");
-  if (row && e.target.type === "checkbox") {
-    $$("input[type=time]", row).forEach((t) => { t.disabled = e.target.checked; });
+  if (row && e.target.matches?.("[data-flag]")) {
+    const closed = $("[data-flag=closed]", row).checked;
+    const all = $("[data-flag=allday]", row).checked && !closed;
+    $$(".field", row).forEach((f) => { f.hidden = all; });
+    $(".allday-note", row).hidden = !all;
+    $$("input[type=time]", row).forEach((t) => { t.disabled = closed || all; });
   }
 });

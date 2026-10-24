@@ -732,7 +732,9 @@ body.is-owner { background: var(--porcelain); }
 .settings-form .grid2 { display: grid; gap: 0 16px; }
 .hours-row { display: grid; grid-template-columns: 56px 1fr 1fr; gap: 8px 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line-on-light); }
 .hours-row .d { font-size: 0.8rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.15em; }
-.hours-row .closed { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; min-height: 44px; font-size: 0.9rem; color: var(--mink); }
+.hours-flags { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0 22px; }
+.hours-row .closed { display: flex; align-items: center; gap: 10px; min-height: 44px; font-size: 0.9rem; color: var(--mink); }
+.allday-note { grid-column: 2 / -1; font-size: 0.95rem; color: var(--onyx); }
 .hours-row input[type="checkbox"], .confirm-box input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--glam-pink); }
 .hours-row .field { margin: 0; }
 .hours-row input[type="time"] { min-height: 46px; padding: 8px 10px; }
@@ -777,7 +779,8 @@ body.is-owner { background: var(--porcelain); }
   .svc-edit .field { margin-bottom: 0; }
   .svc-edit .row2 { display: contents; }
   .hours-row { grid-template-columns: 70px 1fr 1fr auto; }
-  .hours-row .closed { grid-column: auto; }
+  .hours-flags { grid-column: auto; flex-wrap: nowrap; }
+  .allday-note { grid-column: 2 / 4; }
 }
 
 /* ---------- Owner settings: a service with looks ---------- */

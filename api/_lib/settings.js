@@ -93,7 +93,9 @@ function cleanHours(input) {
       out[day] = null;
       continue;
     }
-    if (!TIME_RE.test(h.open || "") || !TIME_RE.test(h.close || "") || toMins(h.close) - toMins(h.open) < 30) {
+    // "24:00" is allowed as a closing time only: it means open until the end of the day.
+    const closeOk = TIME_RE.test(h.close || "") || h.close === "24:00";
+    if (!TIME_RE.test(h.open || "") || !closeOk || toMins(h.close) - toMins(h.open) < 30) {
       throw new HttpError(400, "invalid_settings", `Check the opening hours for ${day[0].toUpperCase() + day.slice(1)}: closing must be at least 30 minutes after opening.`);
     }
     out[day] = { open: h.open, close: h.close };

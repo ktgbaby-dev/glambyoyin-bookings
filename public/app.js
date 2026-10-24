@@ -1,7 +1,7 @@
 // GLAM BY OYIN bookings: client page.
 import {
   ApiError, DOW_SHORT, MONTH_SHORT, addDays, api, bookingTitle, dow, duration, esc, fmtDate, fmtRange, fmtTime,
-  fromMins, naira, pill, studioDate, studioMinutes, toMins, weekdayKey, wireCopyButtons, zonedToEpoch,
+  fromMins, isAllDay, naira, pill, studioDate, studioMinutes, toMins, weekdayKey, wireCopyButtons, zonedToEpoch,
 } from "./lib.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -68,7 +68,7 @@ function renderFacts() {
   const mins = studioMinutes(t, s.tz);
   const h = s.hours[weekdayKey(date)];
   const open = !!h && mins >= toMins(h.open) && mins < toMins(h.close);
-  const today = h ? `Today ${fmtRange(h.open, h.close)}` : "Closed today";
+  const today = h ? (isAllDay(h) ? "Open 24 hours today" : `Today ${fmtRange(h.open, h.close)}`) : "Closed today";
   const deposit = s.depositPct > 0 ? `${s.depositPct}% deposit holds your slot` : "Book online, pay at the studio";
   const items = [
     `<li><span class="label"><span class="open-dot ${open ? "is-open" : ""}"></span>${open ? "Open now" : "Closed now"}</span>${esc(today)}</li>`,
