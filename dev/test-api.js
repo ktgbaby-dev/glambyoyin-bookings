@@ -988,3 +988,33 @@ test("an admin can reset their own password and ask to be made to choose a new o
   const done = await acct(cookie, { action: "change-password", current: "Handed-over-temp-55", next: "My-final-secret-pass-6" });
   assert.equal(done.status, 200);
 });
+
+test("a recovery sign-in isn't held back by a temporary password, and can't be forged from an ordinary cookie", async () => {
+  await setupLogins(); // both logins are still on temporary passwords
+  const temp = await signInAs("ktgbaby", TEMP.ktg);
+  assert.equal(await deskStatus(temp.cookie), 403); // the temporary password has to be swapped first
+  const rec = await signInAs("ktgbaby", process.env.OWNER_PASSWORD);
+  assert.deepEqual([rec.status, rec.data.user.mustChange], [200, false]);
+  assert.equal(await deskStatus(rec.cookie), 200); // the recovery key opens the desk straight away
+  assert.ok(rec.cookie.split("=")[1].startsWith("v2r."));
+  const me = (await acctGet(rec.cookie)).data;
+  assert.deepEqual([me.me.mustChange, me.users.length], [false, 2]);
+  const added = await acct(rec.cookie, { action: "add", name: "Ada", username: "ada", password: "Temp-pass-for-new-55" });
+  assert.equal(added.status, 200); // and admin work is allowed
+
+  // The cookie's signature covers its type: relabelling an ordinary cookie as a recovery one fails.
+  const [name, value] = temp.cookie.split("=");
+  const [, id, expiry, version, mac] = value.split(".");
+  assert.equal(await deskStatus(`${name}=v2r.${id}.${expiry}.${version}.${mac}`), 401);
+  // a member can't use the recovery key at all
+  assert.equal((await signInAs("oyin", process.env.OWNER_PASSWORD)).status, 401);
+  // the ordinary temporary-password session of the same login is still locked
+  assert.equal(await deskStatus(temp.cookie), 403);
+});
+
+test("the default booking policy says payment validates a booking and refunds are not allowed", () => {
+  assert.match(DEFAULT_SETTINGS.policy, /Payment validates your booking/);
+  assert.match(DEFAULT_SETTINGS.policy, /Once a payment has been made, your booking is final and refunds are not allowed/);
+  assert.ok(DEFAULT_SETTINGS.policy.length <= 1000);
+  assert.ok(!DEFAULT_SETTINGS.policy.includes("!"), "no exclamation marks");
+});

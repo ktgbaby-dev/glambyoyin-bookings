@@ -1,6 +1,7 @@
 // Owner sessions: a signed cookie, no server-side session store.
 //
 //   logins exist  ->  v2.<userId>.<expiry>.<sessionVersion>.HMAC-SHA256(SESSION_SECRET, everything before it)
+//   same, but opened with the recovery password  ->  v2r.<...>   (never held back by a temporary password)
 //   no logins yet ->  <expiry>.HMAC-SHA256(SESSION_SECRET, expiry)        (legacy: one shared password)
 //
 // A v2 cookie only counts while the login still exists and its sessionVersion
@@ -46,10 +47,10 @@ export const LEGACY_USER = Object.freeze({
 const cookieAttrs = "Path=/; HttpOnly; Secure; SameSite=Lax";
 const setCookie = (value) => `${COOKIE}=${value}; Max-Age=${SESSION_SECONDS}; ${cookieAttrs}`;
 
-export function sessionCookie(user = LEGACY_USER) {
+export function sessionCookie(user = LEGACY_USER, { recovery = false } = {}) {
   const expiry = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
   if (user.legacy) return setCookie(`${expiry}.${sign(expiry)}`);
-  const body = `v2.${user.id}.${expiry}.${user.sessionVersion ?? 0}`;
+  const body = `${recovery ? "v2r" : "v2"}.${user.id}.${expiry}.${user.sessionVersion ?? 0}`;
   return setCookie(`${body}.${sign(body)}`);
 }
 
@@ -74,16 +75,17 @@ export async function getSession(request) {
     const parts = raw.split(".");
     const nowSec = Math.floor(Date.now() / 1000);
 
-    if (parts[0] === "v2") {
+    if (parts[0] === "v2" || parts[0] === "v2r") {
       if (parts.length !== 5) return null;
-      const [, id, expiry, version, mac] = parts;
+      const [kind, id, expiry, version, mac] = parts;
       if (!id || !/^\d{9,12}$/.test(expiry) || !/^\d{1,9}$/.test(version) || !mac) return null;
       if (Number(expiry) < nowSec) return null;
-      if (!safeEqual(mac, sign(`v2.${id}.${expiry}.${version}`))) return null;
+      if (!safeEqual(mac, sign(`${kind}.${id}.${expiry}.${version}`))) return null;
       const list = await loadUsers();
       const user = list?.users.find((u) => u.id === id);
       if (!user || (user.sessionVersion ?? 0) !== Number(version)) return null;
-      return user;
+      // The recovery password is not a temporary password: it doesn't have to be swapped for a new one first.
+      return kind === "v2r" ? { ...user, mustChange: false, recovery: true } : user;
     }
 
     // legacy cookie: only while no logins exist

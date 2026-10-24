@@ -32,15 +32,20 @@ export function POST(request) {
     const username = normalizeUsername(body.username);
     const user = list.users.find((u) => u.username === username);
     let ok = false;
+    let recovery = false;
     if (user) ok = await verifyPassword(password, user.hash);
     else await burnTime(password);
     // Recovery: the site password opens any admin login, so a forgotten admin password isn't a lock-out.
-    if (!ok && user?.role === "admin" && recoveryConfigured()) ok = passwordMatches(password);
+    if (!ok && user?.role === "admin" && recoveryConfigured()) ok = recovery = passwordMatches(password);
     if (!ok) {
       await sleep(900);
       throw new HttpError(401, "wrong_password", "That username or password isn't right.");
     }
-    return json({ owner: true, accounts: true, user: publicUser(user) }, 200, { "Set-Cookie": sessionCookie(user) });
+    return json(
+      { owner: true, accounts: true, user: publicUser(recovery ? { ...user, mustChange: false } : user) },
+      200,
+      { "Set-Cookie": sessionCookie(user, { recovery }) },
+    );
   });
 }
 

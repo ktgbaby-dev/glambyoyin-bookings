@@ -21,8 +21,9 @@ export const DEFAULT_SETTINGS = {
   allowFullPayment: true, // clients may pay the whole price up front instead of the deposit
   bank: { name: "Ecobank", accountNumber: "0250147305", accountName: "Obaseki Oyindamola" },
   policy:
-    "Your deposit holds your slot and comes off your total on the day; the balance is paid at the studio. " +
-    "Please arrive on time with a clean face. To move or cancel a booking, message us on WhatsApp as early as you can.",
+    "Payment validates your booking. Once a payment has been made, your booking is final and refunds are not allowed. " +
+    "If you pay a deposit, it holds your slot and comes off your total, and the balance is paid at the studio. " +
+    "Please arrive on time with a clean face.",
   hours: {
     sun: { open: "12:00", close: "17:00" },
     mon: null,
