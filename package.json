@@ -1,0 +1,18 @@
+{
+  "name": "glambyoyin-bookings",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "GLAM BY OYIN bookings: service and slot booking with bank-transfer deposits and an owner desk.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node --import ./dev/register.js dev/server.js",
+    "test": "node --import ./dev/register.js --test dev/test-api.js",
+    "test:ui": "node dev/test-ui.mjs"
+  },
+  "dependencies": {
+    "@vercel/blob": "2.8.1"
+  }
+}

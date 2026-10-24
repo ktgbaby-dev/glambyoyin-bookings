@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0e0b0d">
+<title>Book your look · GLAM BY OYIN</title>
+<meta name="description" content="Book a makeup or lash appointment with GLAM BY OYIN in Lagos. Choose your service and time, hold your slot with a deposit, and get your booking code. Beauty, taken seriously.">
+
+<link rel="icon" type="image/x-icon" href="assets/favicon/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="16x16" href="assets/favicon/favicon-16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon/favicon-32.png">
+<link rel="icon" type="image/png" sizes="48x48" href="assets/favicon/favicon-48.png">
+<link rel="icon" type="image/png" sizes="192x192" href="assets/favicon/favicon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="assets/favicon/favicon-512.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/favicon/favicon-180.png">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GLAM BY OYIN">
+<meta property="og:title" content="Book your look · GLAM BY OYIN">
+<meta property="og:description" content="Makeup and lash appointments in Lagos. Hold your slot with a deposit.">
+
+<link rel="preload" href="assets/fonts/BodoniModa-Variable.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="preload" href="assets/fonts/Jost-Variable.ttf" as="font" type="font/ttf" crossorigin>
+<script>document.documentElement.classList.add("js")</script>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <nav class="nav" aria-label="Main">
+    <a href="#top" class="nav-brand" aria-label="GLAM BY OYIN, back to top">
+      <img src="assets/logos/GLAMBYOYIN_Secondary_Reverse_White-Pink.svg" alt="GLAM BY OYIN" class="nav-logo" width="445" height="99">
+    </a>
+    <a href="#services" class="btn btn-primary btn-sm" id="nav-cta">Book Your Look</a>
+    <a href="#top" class="nav-back" id="nav-back" hidden>Back to site</a>
+  </nav>
+</header>
+
+<noscript>
+  <p style="padding:24px;text-align:center">Online booking needs JavaScript. You can book on
+    <a href="https://wa.me/2348137500330" style="text-decoration:underline">WhatsApp</a> instead.</p>
+</noscript>
+
+<!-- ============ CLIENT SITE ============ -->
+<main id="main">
+  <div id="client">
+
+    <section class="hero" id="top">
+      <div class="container">
+        <img src="assets/logos/GLAMBYOYIN_Monogram_Pink.svg" alt="" class="hero-monogram reveal" width="100" height="100">
+        <img src="assets/logos/GLAMBYOYIN_Primary_Reverse_White-Pink.svg" alt="GLAM BY OYIN" class="hero-wordmark reveal" width="737" height="102">
+        <h1 class="reveal">Book your <span class="italic-accent">look.</span></h1>
+        <p class="hero-sub reveal">Beauty, <span class="italic-accent">taken seriously.</span></p>
+        <ul class="facts reveal" id="facts" hidden></ul>
+      </div>
+    </section>
+
+    <section class="section section-porcelain" id="services">
+      <div class="pattern-overlay" aria-hidden="true"></div>
+      <div class="container">
+        <div class="section-header reveal">
+          <span class="eyebrow">Services</span>
+          <h2>Choose your service</h2>
+        </div>
+        <div class="chips" id="chips" role="group" aria-label="Filter by category" hidden></div>
+        <div id="services-list" aria-live="polite"><p class="status-line">Loading services…</p></div>
+      </div>
+    </section>
+
+    <section class="section section-petal" id="book" aria-labelledby="book-title" hidden>
+      <div class="container">
+        <div id="flow">
+          <div class="book-head">
+            <h2 id="book-title">Your booking</h2>
+            <p class="book-service" id="book-service"></p>
+          </div>
+          <ol class="stepbar" id="stepbar" aria-label="Booking steps">
+            <li>Time</li><li>Details</li><li>Deposit</li>
+          </ol>
+
+          <div class="step-panel" id="step-1" hidden>
+            <h3 class="step-title">Pick a day and time</h3>
+            <p class="step-help" id="tz-note"></p>
+            <div class="days" id="days" role="group" aria-label="Day"></div>
+            <h4 class="label subhead" id="times-label">Time</h4>
+            <div class="times" id="times" role="group" aria-labelledby="times-label"></div>
+            <p class="times-note" id="times-note" aria-live="polite"></p>
+            <div class="step-actions">
+              <button type="button" class="btn btn-outline" id="s1-cancel">Change service</button>
+              <button type="button" class="btn btn-primary" id="s1-next" disabled>Continue</button>
+            </div>
+          </div>
+
+          <form class="step-panel" id="step-2" hidden novalidate>
+            <h3 class="step-title">Your details</h3>
+            <p class="step-help">So we can confirm your slot and reach you on WhatsApp.</p>
+            <div class="field" data-field="name">
+              <label for="f-name">Full name</label>
+              <input type="text" id="f-name" name="name" autocomplete="name" maxlength="80" required>
+              <p class="field-error" role="alert" hidden></p>
+            </div>
+            <div class="field" data-field="phone">
+              <label for="f-phone">WhatsApp number</label>
+              <input type="tel" id="f-phone" name="phone" autocomplete="tel" inputmode="tel" maxlength="24" placeholder="0813 750 0330" required>
+              <p class="field-error" role="alert" hidden></p>
+            </div>
+            <div class="field" data-field="note">
+              <label for="f-note">Note <span class="optional">(optional)</span></label>
+              <textarea id="f-note" name="note" maxlength="300" placeholder="Occasion, skin or lash concerns, anything we should know"></textarea>
+              <p class="field-error" role="alert" hidden></p>
+            </div>
+            <div class="step-actions">
+              <button type="button" class="btn btn-outline" id="s2-back">Back</button>
+              <button type="submit" class="btn btn-primary">Continue to deposit</button>
+            </div>
+          </form>
+
+          <form class="step-panel" id="step-3" hidden novalidate>
+            <h3 class="step-title">Hold your slot</h3>
+            <div class="deposit-box">
+              <span class="label">Deposit to pay now</span>
+              <p class="deposit-amount" id="deposit-amount"></p>
+              <p class="deposit-sub" id="deposit-sub"></p>
+            </div>
+            <div class="bank-card" id="bank-card"></div>
+            <div class="field" data-field="payer">
+              <label for="f-payer">Name on the sending account</label>
+              <input type="text" id="f-payer" name="payer" autocomplete="off" maxlength="80" required>
+              <p class="hint">So we can match your transfer to your booking.</p>
+              <p class="field-error" role="alert" hidden></p>
+            </div>
+            <div class="field" data-field="receipt">
+              <span class="field-label">Payment receipt <span class="optional">(optional)</span></span>
+              <div class="receipt-drop">
+                <input type="file" id="f-receipt" accept="image/*">
+                <label for="f-receipt" class="btn btn-outline btn-sm" id="receipt-btn" tabindex="0">Add receipt photo</label>
+                <div class="receipt-preview" id="receipt-preview" hidden>
+                  <img alt="Your receipt" id="receipt-img" width="64" height="64">
+                  <span class="meta" id="receipt-meta"></span>
+                  <button type="button" class="text-btn" id="receipt-remove">Remove</button>
+                </div>
+              </div>
+              <p class="hint">A screenshot or photo of your transfer helps us confirm faster. You can also send it on WhatsApp.</p>
+              <p class="field-error" role="alert" hidden></p>
+            </div>
+            <p class="form-error" id="form-error" role="alert" hidden></p>
+            <div class="step-actions">
+              <button type="button" class="btn btn-outline" id="s3-back">Back</button>
+              <button type="submit" class="btn btn-primary" id="s3-submit">I've paid, book my slot</button>
+            </div>
+          </form>
+        </div>
+
+        <div id="ticket-view" hidden></div>
+      </div>
+    </section>
+
+    <section class="section section-onyx" id="mine" aria-labelledby="mine-title" hidden>
+      <div class="container">
+        <div class="section-header">
+          <span class="eyebrow">On this phone</span>
+          <h2 id="mine-title">Your bookings</h2>
+        </div>
+        <div class="my-list" id="my-list"></div>
+      </div>
+    </section>
+
+    <section class="section section-porcelain" id="info">
+      <div class="container">
+        <div class="info-grid">
+          <div class="info-block reveal">
+            <span class="eyebrow">Opening hours</span>
+            <h3>When you can book</h3>
+            <ul class="hours" id="hours"></ul>
+          </div>
+          <div class="info-block reveal">
+            <span class="eyebrow">Booking policy</span>
+            <h3>Good to know</h3>
+            <p id="policy"></p>
+          </div>
+          <div class="info-block reveal">
+            <span class="eyebrow">Contact</span>
+            <h3>Say hello</h3>
+            <div class="contact-lines" id="contact-lines"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============ OWNER DESK ============ -->
+  <div id="owner" hidden>
+    <div class="container owner-wrap" id="owner-root"></div>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-top">
+      <div>
+        <a href="#top" aria-label="GLAM BY OYIN, back to top">
+          <img src="assets/logos/GLAMBYOYIN_Secondary_Reverse_White-Pink.svg" alt="GLAM BY OYIN" class="footer-logo" width="445" height="99">
+        </a>
+        <p class="footer-tagline">Beauty, taken seriously.</p>
+      </div>
+      <nav class="footer-links" aria-label="Footer">
+        <a href="#services">Services</a>
+        <a href="#info">Hours</a>
+        <a href="#owner" id="owner-link">Studio owner? Sign in</a>
+      </nav>
+    </div>
+    <div class="footer-bottom">
+      <p class="footer-note">&copy; <span id="year">2026</span> GLAM BY OYIN. All rights reserved.</p>
+      <div class="powered-by">
+        <span>Powered by</span>
+        <img src="assets/powered-by-logo.png" alt="K logo">
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
