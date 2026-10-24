@@ -21,6 +21,7 @@ export const DEFAULT_SETTINGS = {
   allowFullPayment: true, // clients may pay the whole price up front instead of the deposit
   holdHours: 3, // a booking with no receipt holds its slot this long; 0 = until the owner decides
   notifyNewBookings: true, // email the studio when a booking comes in (needs RESEND_API_KEY on the server)
+  notifyReminders: true, // email the studio a reminder 48 hours before each appointment
   bank: { name: "Ecobank", accountNumber: "0250147305", accountName: "Obaseki Oyindamola" },
   policy:
     "Payment validates your booking. Once a payment has been made, your booking is final and refunds are not allowed. " +
@@ -252,6 +253,7 @@ export function cleanSettings(input) {
     depositPct,
     allowFullPayment: input.allowFullPayment !== false,
     notifyNewBookings: input.notifyNewBookings !== false,
+    notifyReminders: input.notifyReminders !== false,
     holdHours,
     bank: {
       name: text(input.bank?.name, 60, { required: true, label: "Bank name" }),

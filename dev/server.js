@@ -13,6 +13,7 @@ const port = Number(process.env.PORT || 5630);
 // Dev-only credentials; production uses the real env vars.
 process.env.OWNER_PASSWORD ??= "dev-password";
 process.env.SESSION_SECRET ??= "dev-session-secret-dev-session-secret";
+process.env.CRON_SECRET ??= "dev-cron-secret-dev-cron-secret";
 
 const MIME = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",

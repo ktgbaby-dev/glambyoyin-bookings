@@ -1191,7 +1191,7 @@ async function withResend(answer, fn, { key = "re_test_key", env = {} } = {}) {
   if (env.NOTIFY_EMAIL) process.env.NOTIFY_EMAIL = env.NOTIFY_EMAIL;
   globalThis.fetch = async (url, init) => {
     if (!String(url).startsWith("https://api.resend.com")) return realFetch(url, init);
-    const c = { url: String(url), init, body: JSON.parse(init.body) };
+    const c = { url: String(url), init, body: init.body ? JSON.parse(init.body) : null };
     calls.push(c);
     return answer(c);
   };
@@ -1305,4 +1305,512 @@ test("if the email service fails, errors out or hangs, the booking is still made
   assert.equal(list.length, 3, "all three bookings were saved");
   assert.ok(errors.some((e) => e.includes("Resend answered 500")), errors.join(" | "));
   assert.ok(errors.every((e) => !e.includes("re_test_key")), "the key is never logged");
+});
+
+// ---------- 48 hour appointment reminders ----------
+
+const reminders = await import("../api/_lib/reminders.js");
+const cronApi = await import("../api/cron/reminders.js");
+const storeApi = await import("../api/_lib/store.js");
+const bookingsApi = await import("../api/_lib/bookings.js");
+const settingsApi = await import("../api/_lib/settings.js");
+const getBooking = async (id) => (await storeApi.readJson(`bookings/${id}.json`))?.data;
+const CRON_SECRET = "test-cron-secret-test-cron-secret";
+
+// A stand-in for Resend that remembers what was scheduled, honours idempotency keys, and can be made to fail.
+function makeResend() {
+  const emails = new Map();
+  const keys = new Map();
+  const log = [];
+  const fail = { post: [], cancel: [], get: [] }; // each entry is a status number, or "throw"
+  const respond = (status, data) => new Response(JSON.stringify(data), { status });
+  const scripted = (queue) => {
+    const next = queue.shift();
+    if (next === "throw") throw new Error("network down");
+    return next ? respond(next, { message: `scripted ${next}` }) : null;
+  };
+  const handle = ({ url, init }) => {
+    const path = new URL(url).pathname;
+    const method = init.method || "GET";
+    const body = init.body ? JSON.parse(init.body) : null;
+    log.push({ method, path, body, key: init.headers["Idempotency-Key"] });
+    if (method === "POST" && path === "/emails") {
+      const bad = scripted(fail.post);
+      if (bad) return bad;
+      const key = init.headers["Idempotency-Key"];
+      if (key && keys.has(key)) return respond(200, { id: keys.get(key) });
+      const id = "em_" + String(emails.size + 1).padStart(8, "0");
+      if (key) keys.set(key, id);
+      emails.set(id, { id, body, last_event: body.scheduled_at ? "scheduled" : "delivered" });
+      return respond(200, { id });
+    }
+    const cancel = path.match(/^\/emails\/([^/]+)\/cancel$/);
+    if (method === "POST" && cancel) {
+      const bad = scripted(fail.cancel);
+      if (bad) return bad;
+      const e = emails.get(cancel[1]);
+      if (!e) return respond(404, { message: "not found" });
+      if (e.last_event !== "scheduled") return respond(409, { message: "already sent" });
+      e.last_event = "canceled";
+      return respond(200, { id: e.id });
+    }
+    const one = path.match(/^\/emails\/([^/]+)$/);
+    if (method === "GET" && one) {
+      const bad = scripted(fail.get);
+      if (bad) return bad;
+      const e = emails.get(one[1]);
+      return e ? respond(200, { id: e.id, last_event: e.last_event }) : respond(404, { message: "not found" });
+    }
+    return respond(404, { message: "unknown" });
+  };
+  return {
+    emails, log, fail, handle,
+    scheduled: () => [...emails.values()].filter((e) => e.last_event === "scheduled"),
+    posts: () => log.filter((l) => l.method === "POST" && l.path === "/emails"),
+    reminderPosts: () => log.filter((l) => l.method === "POST" && l.path === "/emails" && l.body.scheduled_at),
+  };
+}
+const withCron = async (fn) => {
+  const saved = process.env.CRON_SECRET;
+  process.env.CRON_SECRET = CRON_SECRET;
+  try { return await fn(); } finally { if (saved === undefined) delete process.env.CRON_SECRET; else process.env.CRON_SECRET = saved; }
+};
+const quietly = async (fn) => {
+  const real = console.error, realLog = console.log;
+  const errors = [];
+  console.error = (...a) => errors.push(a.join(" "));
+  console.log = () => {};
+  try { return { result: await fn(), errors }; } finally { console.error = real; console.log = realLog; }
+};
+const startOf = (b, tz = "Africa/Lagos") => time.zonedToEpoch(b.date, b.time, tz);
+// A booking a few days out, paid (receipt attached), so it qualifies for a reminder.
+async function paidBooking(offset = 4, extra = {}) {
+  const { date, open } = await bookable(offset);
+  const r = await bookAt(date, open, { receipt: receipt(2000), ...extra });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  return { ...r.data.booking, date, time: open };
+}
+
+test("the rules: due exactly 48 hours before the start; unpaid, cancelled and late-booked appointments get none", () => {
+  const settings = DEFAULT_SETTINGS;
+  const now = Date.UTC(2026, 9, 24, 8, 0); // Sat 24 Oct 2026, 09:00 Lagos
+  const b = (over = {}) => ({ id: "x", status: "confirmed", date: "2026-10-30", time: "10:00", createdAt: new Date(now).toISOString(), hasReceipt: true, deposit: 12500, ...over });
+  const start = Date.UTC(2026, 9, 30, 9, 0); // 10:00 Lagos
+  const ok = reminders.reminderPlan(b(), settings, now);
+  assert.deepEqual([ok.valid, ok.startMs, ok.sendAtMs, ok.past], [true, start, start - 48 * HOUR, false]);
+  assert.equal(reminders.reminderPlan(b({ status: "pending", hasReceipt: true }), settings, now).valid, true); // paid, awaiting confirmation
+  assert.equal(reminders.reminderPlan(b({ status: "pending", hasReceipt: false, deposit: 0 }), settings, now).valid, true); // nothing to pay
+  const unpaid = reminders.reminderPlan(b({ status: "pending", hasReceipt: false }), settings, now);
+  assert.deepEqual([unpaid.valid, unpaid.reason], [false, "payment has not been received"]);
+  for (const status of ["rejected", "noshow", "done"]) assert.equal(reminders.reminderPlan(b({ status }), settings, now).valid, false, status);
+  const late = reminders.reminderPlan(b({ date: "2026-10-25", createdAt: new Date(now).toISOString() }), settings, now); // 25 Oct 10:00 is 25 hours away
+  assert.deepEqual([late.valid, late.reason, late.record], [false, "booked less than 48 hours ahead", true]);
+  assert.equal(reminders.reminderPlan(b(), { ...settings, notifyReminders: false }, now).valid, false);
+  // the 48 hour mark already behind us (a late confirmation) is reported as past, not scheduled
+  assert.equal(reminders.reminderPlan(b({ createdAt: new Date(now - 5 * 24 * HOUR).toISOString() }), settings, start - 47 * HOUR).past, true);
+  assert.equal(reminders.reminderPlan(b(), settings, start - 49 * HOUR).past, false);
+});
+
+test("daylight saving: 48 hours means 48 elapsed hours, not the same clock time two days earlier", () => {
+  const tz = "America/New_York"; // clocks go forward at 02:00 on Sun 14 March 2027
+  const settings = { ...DEFAULT_SETTINGS, tz };
+  const b = { id: "x", status: "confirmed", date: "2027-03-14", time: "10:00", createdAt: "2027-03-01T00:00:00Z", hasReceipt: true, deposit: 1 };
+  const plan = reminders.reminderPlan(b, settings, Date.UTC(2027, 2, 10));
+  assert.equal(plan.startMs, Date.UTC(2027, 2, 14, 14, 0)); // 10:00 EDT is 14:00 UTC
+  assert.equal(plan.sendAtMs, plan.startMs - 48 * HOUR);
+  assert.equal(new Date(plan.sendAtMs).toISOString(), "2027-03-12T14:00:00.000Z"); // 09:00 EST on the 12th, an hour earlier on the clock than the appointment
+  assert.notEqual(plan.sendAtMs, time.zonedToEpoch("2027-03-12", "10:00", tz)); // not "10:00 two days before"
+  // Lagos has no daylight saving, so its reminders always fall on the same clock time
+  const lagos = reminders.reminderPlan({ ...b, date: "2026-10-30" }, DEFAULT_SETTINGS, Date.UTC(2026, 9, 24));
+  assert.equal(new Date(lagos.sendAtMs).toISOString(), "2026-10-28T09:00:00.000Z");
+});
+
+test("a qualifying booking gets its reminder scheduled for the 48 hour mark, with the same sender and recipients as the new-booking alert", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const b = await paidBooking(4, { name: "Ada Obi", note: "Bring the veil" });
+    const posts = fake.posts();
+    assert.equal(posts.length, 2, "the new-booking alert and the reminder");
+    const alert = posts.find((p) => !p.body.scheduled_at);
+    const reminder = posts.find((p) => p.body.scheduled_at);
+    assert.equal(reminder.body.scheduled_at, new Date(startOf(b) - 48 * HOUR).toISOString());
+    assert.ok(Date.parse(reminder.body.scheduled_at) > Date.now(), "never in the past");
+    assert.ok(reminder.body.subject.startsWith("Reminder: Soft Glam"), reminder.body.subject);
+    for (const need of ["Ada Obi (08137500330)", "Bring the veil", `Booking code: ${b.code}`, "starts in 48 hours", "Open the desk: https://localhost/#owner"]) {
+      assert.ok(reminder.body.text.includes(need), `missing "${need}" in:\n${reminder.body.text}`);
+    }
+    assert.deepEqual([reminder.body.from, reminder.body.to], [alert.body.from, alert.body.to]); // one channel
+    assert.deepEqual(reminder.body.to, [DEFAULT_SETTINGS.email]);
+    assert.equal(reminder.key, `reminder/${b.id}/${startOf(b)}/0`);
+    const saved = await getBooking(b.id);
+    assert.deepEqual([saved.reminder.state, saved.reminder.emailId, saved.reminder.sendAtMs, saved.reminder.for], ["scheduled", "em_00000002", startOf(b) - 48 * HOUR, startOf(b)]);
+    // nothing about the reminder reaches the client
+    const st = await call(status.GET, { path: `/api/status?id=${b.id}&code=${b.code}` });
+    assert.ok(!JSON.stringify(st.data).includes("reminder"));
+  });
+});
+
+test("nothing is sent early or at once: reminders only ever go out as scheduled emails", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    await paidBooking(4);
+    await paidBooking(6, { name: "Second Client" });
+    const reminderPosts = fake.posts().filter((p) => p.body.subject.startsWith("Reminder:"));
+    assert.equal(reminderPosts.length, 2);
+    for (const p of reminderPosts) assert.ok(p.body.scheduled_at && Date.parse(p.body.scheduled_at) > Date.now() + 24 * HOUR);
+    assert.ok([...fake.emails.values()].filter((e) => e.body.subject.startsWith("Reminder:")).every((e) => e.last_event === "scheduled"));
+  });
+});
+
+test("an unpaid booking gets no reminder until its payment is confirmed", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const cookie = await ownerCookie();
+    const { date, open } = await bookable(4);
+    const b = (await bookAt(date, open)).data.booking; // no receipt: holds its slot, unpaid
+    assert.equal(fake.reminderPosts().length, 0);
+    assert.equal((await getBooking(b.id)).reminder, undefined);
+    assert.equal((await ownerPost(cookie, { action: "status", id: b.id, status: "confirmed" })).status, 200);
+    assert.equal(fake.reminderPosts().length, 1, "confirming the payment schedules it");
+    assert.equal(fake.reminderPosts()[0].body.scheduled_at, new Date(startOf({ date, time: open }) - 48 * HOUR).toISOString());
+  });
+});
+
+test("rejected, no-show and deleted bookings have their scheduled reminder cancelled", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const cookie = await ownerCookie();
+    const a = await paidBooking(4, { name: "To Reject" });
+    const b = await paidBooking(6, { name: "To Delete" });
+    const c = await paidBooking(8, { name: "To Confirm Then No-show" });
+    assert.equal(fake.scheduled().filter((e) => e.body.subject.startsWith("Reminder:")).length, 3);
+
+    await ownerPost(cookie, { action: "status", id: a.id, status: "rejected" });
+    assert.equal((await getBooking(a.id)).reminder.state, "cancelled");
+    assert.ok(fake.emails.get((await getBooking(a.id)).reminder.emailId).last_event === "canceled");
+
+    const emailOfB = (await getBooking(b.id)).reminder.emailId;
+    assert.equal((await ownerPost(cookie, { action: "delete", id: b.id })).status, 200);
+    assert.equal(fake.emails.get(emailOfB).last_event, "canceled");
+
+    await ownerPost(cookie, { action: "status", id: c.id, status: "confirmed" });
+    await ownerPost(cookie, { action: "status", id: c.id, status: "noshow" });
+    assert.equal((await getBooking(c.id)).reminder.state, "cancelled");
+    assert.equal(fake.scheduled().filter((e) => e.body.subject.startsWith("Reminder:")).length, 0, "no reminder is left to fire");
+  });
+});
+
+test("when an appointment moves, the old reminder is cancelled and a new one follows the new time", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const b = await paidBooking(4);
+    const first = (await getBooking(b.id)).reminder;
+    // Move it two days later (there is no reschedule button yet, so change the records directly, the way one would)
+    const { date: newDate } = await bookable(7);
+    await bookingsApi.releaseSlot(b.date, b.id);
+    await bookingsApi.reserveSlot({ date: newDate, time: b.time, mins: 90, id: b.id });
+    const rec = await storeApi.readJson(`bookings/${b.id}.json`);
+    await storeApi.writeJson(`bookings/${b.id}.json`, { ...rec.data, date: newDate }, { ifMatch: rec.etag });
+
+    const r = await reminders.syncReminder(b.id);
+    assert.equal(r.action, "scheduled");
+    assert.equal(fake.emails.get(first.emailId).last_event, "canceled");
+    const second = (await getBooking(b.id)).reminder;
+    assert.notEqual(second.emailId, first.emailId);
+    assert.equal(second.sendAtMs, startOf({ date: newDate, time: b.time }) - 48 * HOUR);
+    assert.equal(fake.reminderPosts().at(-1).body.scheduled_at, new Date(second.sendAtMs).toISOString());
+    assert.equal(fake.scheduled().filter((e) => e.body.subject.startsWith("Reminder:")).length, 1, "exactly one reminder is left");
+    assert.equal((await reminders.syncReminder(b.id)).action, "none"); // and running again changes nothing
+  });
+});
+
+test("booked less than 48 hours ahead: no reminder, and never a late or immediate one", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const cookie = await ownerCookie();
+    const { date, open } = await bookable(1); // tomorrow: inside the 48 hours
+    const b = (await bookAt(date, open, { receipt: receipt(2000) })).data.booking;
+    assert.equal(fake.reminderPosts().length, 0);
+    const saved = await getBooking(b.id);
+    assert.deepEqual([saved.reminder.state, saved.reminder.reason], ["skipped", "booked less than 48 hours ahead"]);
+    // confirming it, and running the daily job, changes nothing
+    await ownerPost(cookie, { action: "status", id: b.id, status: "confirmed" });
+    await withCron(() => call(cronApi.GET, { path: "/api/cron/reminders", headers: { authorization: `Bearer ${CRON_SECRET}` } }));
+    assert.equal(fake.reminderPosts().length, 0);
+    assert.equal(fake.posts().filter((p) => !p.body.scheduled_at && p.body.subject.startsWith("Reminder")).length, 0);
+  });
+});
+
+test("a booking confirmed after its 48 hour mark has gone by is not reminded late", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const cookie = await ownerCookie();
+    const { date, open } = await bookable(4);
+    const b = (await bookAt(date, open)).data.booking; // unpaid, so no reminder yet
+    const start = startOf({ date, time: open });
+    // time passes until the owner confirms it 47 hours before the start
+    const travel = start - 47 * HOUR - Date.now();
+    await afterwards(travel, async () => {
+      assert.equal((await ownerPost(cookie, { action: "status", id: b.id, status: "confirmed" })).status, 200);
+    });
+    assert.equal(fake.reminderPosts().length, 0);
+    assert.equal((await getBooking(b.id)).reminder.state, "skipped");
+  });
+});
+
+test("running the scheduler again and again, or twice at once, never makes a second reminder", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const b = await paidBooking(4);
+    const once = fake.reminderPosts().length;
+    assert.equal(once, 1);
+    await withCron(async () => {
+      const run = () => call(cronApi.GET, { path: "/api/cron/reminders", headers: { authorization: `Bearer ${CRON_SECRET}` } });
+      for (let i = 0; i < 3; i++) assert.equal((await run()).status, 200);
+      await Promise.all([run(), run(), run()]);
+    });
+    await Promise.all([reminders.syncReminder(b.id), reminders.syncReminder(b.id), reminders.syncReminder(b.id)]);
+    assert.equal(fake.reminderPosts().length, 1);
+    assert.equal(fake.emails.size, 2); // the alert and one reminder
+  });
+});
+
+test("two workers racing to schedule a brand new reminder: exactly one wins", async () => {
+  const fake = makeResend();
+  const { date, open } = await bookable(4);
+  const b = (await bookAt(date, open, { receipt: receipt(2000) })).data.booking; // no key yet: nothing scheduled
+  assert.equal((await getBooking(b.id)).reminder, undefined);
+  await withResend(fake.handle, async () => {
+    const results = await Promise.all([reminders.syncReminder(b.id), reminders.syncReminder(b.id), reminders.syncReminder(b.id), reminders.syncReminder(b.id)]);
+    assert.equal(results.filter((r) => r.action === "scheduled").length, 1, JSON.stringify(results));
+    assert.equal(fake.reminderPosts().length, 1);
+  });
+});
+
+test("a worker that died mid-way is recovered without a duplicate: the same idempotency key returns the same email", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const b = await paidBooking(4);
+    const sent = (await getBooking(b.id)).reminder;
+    // pretend the process died after Resend accepted the email but before the result was saved
+    const rec = await storeApi.readJson(`bookings/${b.id}.json`);
+    await storeApi.writeJson(`bookings/${b.id}.json`, { ...rec.data, reminder: { for: sent.for, sendAtMs: sent.sendAtMs, rev: 0, attempts: 1, state: "scheduling", claimedAt: Date.now() - 10 * 60_000 } }, { ifMatch: rec.etag });
+    assert.equal((await reminders.syncReminder(b.id)).action, "scheduled");
+    assert.equal(fake.reminderPosts().length, 2, "Resend was asked twice");
+    assert.equal(fake.reminderPosts()[0].key, fake.reminderPosts()[1].key);
+    assert.equal([...fake.emails.values()].filter((e) => e.body.subject.startsWith("Reminder:")).length, 1, "but only one email exists");
+    assert.equal((await getBooking(b.id)).reminder.emailId, sent.emailId);
+  });
+});
+
+test("a failure to schedule is logged and retried with a growing wait", async () => {
+  const fake = makeResend();
+  const { errors } = await quietly(async () => {
+    await withResend(fake.handle, async () => {
+      fake.fail.post.push(null, 503); // the new-booking alert goes through; the reminder gets a 503
+      const { date, open } = await bookable(4);
+      const b = (await bookAt(date, open, { receipt: receipt(2000), name: "Retry Client" })).data.booking;
+      const s1 = (await getBooking(b.id)).reminder;
+      assert.deepEqual([s1.state, s1.attempts], ["retry", 1]);
+      assert.ok(s1.lastError.includes("503") && s1.nextTryAt > Date.now(), JSON.stringify(s1));
+      assert.equal((await reminders.syncReminder(b.id)).action, "waiting"); // too soon to try again
+      assert.equal(fake.reminderPosts().length, 1);
+      // after the wait Resend is back: it is scheduled, with the same idempotency key as the first try
+      await afterwards(20 * 60_000, async () => assert.equal((await reminders.syncReminder(b.id)).action, "scheduled"));
+      const s2 = (await getBooking(b.id)).reminder;
+      assert.deepEqual([s2.state, s2.attempts], ["scheduled", 2]);
+      assert.equal(fake.reminderPosts()[0].key, fake.reminderPosts()[1].key);
+      assert.equal(fake.scheduled().length, 1);
+    });
+  });
+  assert.ok(errors.some((e) => e.includes("will retry") && e.includes("503")), errors.join(" | "));
+});
+
+test("a refused request is not retried; endless failures stop after 6 tries; the key is never logged", async () => {
+  const fake = makeResend();
+  const { errors } = await quietly(async () => {
+    await withResend(fake.handle, async () => {
+      // 422: Resend will never accept this, so there is no retry
+      const { date, open } = await bookable(4);
+      fake.fail.post.push(null, 422);
+      const a = (await bookAt(date, open, { receipt: receipt(2000) })).data.booking;
+      assert.equal((await getBooking(a.id)).reminder.state, "failed");
+      assert.equal((await reminders.syncReminder(a.id)).action, "none");
+
+      // network errors every time: six tries, each after its wait, then it stops for good
+      const { date: d2, open: o2 } = await bookable(12);
+      fake.fail.post.push(null, "throw");
+      const b = (await bookAt(d2, o2, { receipt: receipt(2000), name: "Always Down" })).data.booking;
+      assert.equal((await getBooking(b.id)).reminder.attempts, 1);
+      let waited = 0;
+      for (const step of [20, 70, 200, 750, 1500]) { // minutes: just past each growing wait
+        waited += step * 60_000;
+        fake.fail.post.push("throw");
+        await afterwards(waited, () => reminders.syncReminder(b.id));
+      }
+      const final = (await getBooking(b.id)).reminder;
+      assert.deepEqual([final.state, final.attempts], ["failed", reminders.MAX_ATTEMPTS]);
+      await afterwards(waited + 48 * HOUR, async () => assert.equal((await reminders.syncReminder(b.id)).action, "none"));
+    });
+  });
+  assert.ok(errors.some((e) => e.includes("giving up")));
+  assert.ok(errors.every((e) => !e.includes("re_test_key")), "the key is never logged");
+});
+
+test("reminders only ever go to the studio address: never the client", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    await paidBooking(4, { phone: "08099998888", name: "Client Name" });
+    assert.equal(fake.posts().length, 2);
+    for (const p of fake.posts()) {
+      assert.deepEqual(p.body.to, [DEFAULT_SETTINGS.email]);
+      assert.ok(!JSON.stringify(p.body.to).includes("0809"));
+    }
+  });
+  // NOTIFY_EMAIL, when set, steers both the alert and the reminder
+  const fake2 = makeResend();
+  await withResend(fake2.handle, async () => {
+    await paidBooking(7, { name: "Another" });
+    assert.ok(fake2.posts().length === 2 && fake2.posts().every((p) => p.body.to[0] === "studio@example.com"));
+  }, { env: { NOTIFY_EMAIL: "studio@example.com" } });
+});
+
+test("clients' words can't inject markup into a reminder", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    await paidBooking(4, { name: "<script>alert(1)</script> Eve", note: `"><img src=x onerror=alert(1)>` });
+    const html = fake.reminderPosts()[0].body.html;
+    assert.ok(!html.includes("<script>") && !html.includes("<img"), html);
+  });
+});
+
+test("the daily job schedules reminders that were missed (for example bookings made before email was set up)", async () => {
+  const a = await paidBooking(4, { name: "Before The Key" }); // no key: nothing scheduled
+  const b = await paidBooking(6, { name: "Also Before" });
+  assert.equal((await getBooking(a.id)).reminder, undefined);
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const run = await withCron(() => call(cronApi.GET, { path: "/api/cron/reminders", headers: { authorization: `Bearer ${CRON_SECRET}` } }));
+    assert.equal(run.status, 200, JSON.stringify(run.data));
+    assert.equal(run.data.emailConfigured, true);
+    assert.equal(run.data.bookings, 2);
+    assert.equal(run.data.actions.scheduled, 2);
+    assert.equal(fake.reminderPosts().length, 2);
+    for (const id of [a.id, b.id]) assert.equal((await getBooking(id)).reminder.state, "scheduled");
+  });
+});
+
+test("the daily job reports delivery: a reminder that went out is marked sent; a bounce is marked failed and logged", async () => {
+  const fake = makeResend();
+  const { errors } = await quietly(async () => {
+    await withResend(fake.handle, async () => {
+      const a = await paidBooking(4, { name: "Delivered" });
+      const b = await paidBooking(7, { name: "Bounced" });
+      const ea = (await getBooking(a.id)).reminder, eb = (await getBooking(b.id)).reminder;
+      fake.emails.get(ea.emailId).last_event = "delivered";
+      fake.emails.get(eb.emailId).last_event = "bounced";
+      // 10 minutes after the first one was due (its 48 hour mark is the earlier one)
+      await afterwards(ea.sendAtMs - Date.now() + 11 * 60_000, async () => {
+        await withCron(() => call(cronApi.GET, { path: "/api/cron/reminders", headers: { authorization: `Bearer ${CRON_SECRET}` } }));
+      });
+      assert.equal((await getBooking(a.id)).reminder.state, "sent");
+      await afterwards(eb.sendAtMs - Date.now() + 11 * 60_000, async () => {
+        await withCron(() => call(cronApi.GET, { path: "/api/cron/reminders", headers: { authorization: `Bearer ${CRON_SECRET}` } }));
+      });
+      const failed = (await getBooking(b.id)).reminder;
+      assert.deepEqual([failed.state, failed.delivery], ["failed", "bounced"]);
+    });
+  });
+  assert.ok(errors.some((e) => e.includes("was not delivered")), errors.join(" | "));
+});
+
+test("a cancellation that could not reach Resend is kept and retried by the daily job", async () => {
+  const fake = makeResend();
+  const { errors } = await quietly(async () => {
+    await withResend(fake.handle, async () => {
+      const cookie = await ownerCookie();
+      const b = await paidBooking(4);
+      const emailId = (await getBooking(b.id)).reminder.emailId;
+      fake.fail.cancel.push(503); // Resend is down just when the owner deletes the booking
+      assert.equal((await ownerPost(cookie, { action: "delete", id: b.id })).status, 200);
+      assert.equal(fake.emails.get(emailId).last_event, "scheduled", "still queued at Resend");
+      assert.ok(__mock.paths("reminders/cancel/").length === 1, "remembered for later");
+      // Resend is back
+      const run = await withCron(() => call(cronApi.GET, { path: "/api/cron/reminders", headers: { authorization: `Bearer ${CRON_SECRET}` } }));
+      assert.equal(run.data.tombstones, 1);
+      assert.equal(fake.emails.get(emailId).last_event, "canceled");
+      assert.equal(__mock.paths("reminders/cancel/").length, 0, "and forgotten once done");
+    });
+  });
+  assert.ok(errors.some((e) => e.includes("could not be cancelled yet")), errors.join(" | "));
+});
+
+test("switching reminders off in Settings cancels the pending ones at the next run, and back on schedules them again", async () => {
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const cookie = await ownerCookie();
+    const b = await paidBooking(4);
+    const first = (await getBooking(b.id)).reminder.emailId;
+    const cur = (await call(owner.GET, { path: "/api/owner", cookie })).data.settings;
+    assert.equal(cur.notifyReminders, true); // on by default
+    await ownerPost(cookie, { action: "settings", settings: { ...cur, notifyReminders: false } });
+    const run = () => withCron(() => call(cronApi.GET, { path: "/api/cron/reminders", headers: { authorization: `Bearer ${CRON_SECRET}` } }));
+    await run();
+    assert.equal(fake.emails.get(first).last_event, "canceled");
+    assert.equal((await getBooking(b.id)).reminder.state, "cancelled");
+    await ownerPost(cookie, { action: "settings", settings: { ...cur, notifyReminders: true } });
+    await run();
+    const again = (await getBooking(b.id)).reminder;
+    assert.equal(again.state, "scheduled");
+    assert.notEqual(again.emailId, first);
+    assert.equal(fake.scheduled().filter((e) => e.body.subject.startsWith("Reminder:")).length, 1);
+  });
+});
+
+test("the daily job's endpoint is locked: no secret, a wrong one, or an unset server secret all refuse", async () => {
+  const at = (headers) => call(cronApi.GET, { path: "/api/cron/reminders", headers });
+  await withCron(async () => {
+    assert.equal((await at({})).status, 401);
+    assert.equal((await at({ authorization: "Bearer wrong" })).status, 401);
+    assert.equal((await at({ authorization: CRON_SECRET })).status, 401); // must be a Bearer token
+    assert.equal((await at({ authorization: `Bearer ${CRON_SECRET}` })).status, 200);
+    assert.equal((await call(cronApi.POST, { method: "POST", path: "/api/cron/reminders", headers: { authorization: `Bearer ${CRON_SECRET}` } })).status, 200);
+    assert.equal((await call(cronApi.POST, { method: "POST", path: "/api/cron/reminders" })).status, 401);
+    // a visitor's or the owner's session is not the job's secret
+    assert.equal((await call(cronApi.GET, { path: "/api/cron/reminders", cookie: await ownerCookie() })).status, 401);
+    const body = await at({ authorization: `Bearer ${CRON_SECRET}` });
+    assert.ok(!JSON.stringify(body.data).includes(CRON_SECRET) && !JSON.stringify(body.data).includes("re_"), "the response leaks nothing");
+  });
+  const saved = process.env.CRON_SECRET;
+  delete process.env.CRON_SECRET;
+  assert.equal((await at({ authorization: "Bearer anything" })).status, 503); // not configured: refuses everyone
+  process.env.CRON_SECRET = "short";
+  assert.equal((await at({ authorization: "Bearer short" })).status, 503); // too short to trust
+  if (saved === undefined) delete process.env.CRON_SECRET; else process.env.CRON_SECRET = saved;
+});
+
+test("with no Resend key the daily job says so and does nothing; the desk shows each reminder's state", async () => {
+  await withCron(async () => {
+    await paidBooking(4);
+    const run = await call(cronApi.GET, { path: "/api/cron/reminders", headers: { authorization: `Bearer ${CRON_SECRET}` } });
+    assert.equal(run.status, 200);
+    assert.equal(run.data.emailConfigured, false);
+    assert.match(run.data.note, /RESEND_API_KEY/);
+  });
+  const fake = makeResend();
+  await withResend(fake.handle, async () => {
+    const cookie = await ownerCookie();
+    const b = await paidBooking(5, { name: "Shown On Desk" });
+    const row = (await call(owner.GET, { path: "/api/owner", cookie })).data.bookings.find((x) => x.id === b.id);
+    assert.equal(row.reminder.state, "scheduled");
+    assert.equal(row.reminder.sendAtMs, startOf(b) - 48 * HOUR);
+  });
+});
+
+test("the default settings switch reminders on, and Settings validates and keeps the switch", async () => {
+  assert.equal(DEFAULT_SETTINGS.notifyReminders, true);
+  const { cleanSettings } = settingsApi;
+  const { notifyReminders, ...without } = DEFAULT_SETTINGS;
+  assert.equal(cleanSettings(without).notifyReminders, true); // settings saved before this existed
+  assert.equal(cleanSettings({ ...DEFAULT_SETTINGS, notifyReminders: false }).notifyReminders, false);
 });

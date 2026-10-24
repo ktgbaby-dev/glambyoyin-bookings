@@ -228,6 +228,20 @@ function bookingsHtml() {
     <div class="bk-list">${list.length ? list.map(cardHtml).join("") : `<p class="empty">${empty}</p>`}</div>`;
 }
 
+// What happened with this booking's 48 hour reminder email, in plain words.
+function reminderRow(b) {
+  const r = b.reminder;
+  if (!r) return "";
+  let text = "";
+  if (r.state === "scheduled") text = Number.isFinite(r.sendAtMs) ? `Email set for ${fmtHold(r.sendAtMs, state.settings.tz, nowMs())}` : "Email set";
+  else if (r.state === "sent") text = "Email sent";
+  else if (r.state === "scheduling") text = "Being set up";
+  else if (r.state === "retry") text = `Not set up yet, will try again (${r.lastError || "no answer"})`;
+  else if (r.state === "failed") text = `Not sent: ${r.lastError || "it failed"}`;
+  else if (r.state === "skipped") text = `None: ${r.reason}`;
+  return text ? `<dt>Reminder</dt><dd>${esc(text)}</dd>` : "";
+}
+
 function cardHtml(b) {
   const proofBtn = b.hasReceipt
     ? `<button type="button" class="btn btn-outline" data-action="proof" data-id="${esc(b.id)}">View receipt</button>`
@@ -257,6 +271,7 @@ function cardHtml(b) {
         <dt>Paid by</dt><dd>${esc(b.payer)}</dd>
         <dt>Code</dt><dd class="code">${esc(b.code)}</dd>
         <dt>Receipt</dt><dd>${b.hasReceipt ? "Uploaded" : "Not uploaded"}</dd>
+        ${reminderRow(b)}
         ${b.status === "pending" && b.holdUntil && !holdExpired(b) ? `<dt>Held until</dt><dd>${esc(fmtHold(b.holdUntil, state.settings.tz, nowMs()))}</dd>` : ""}
       </dl>
       ${holdExpired(b) ? `<p class="bk-note">The hold ran out without a receipt, so this slot was released. Confirm only if the client has paid. It will be booked again if it is still free.</p>` : ""}
@@ -384,6 +399,10 @@ function settingsHtml() {
         <div class="confirm-box">
           <input type="checkbox" id="s-notify" ${s.notifyNewBookings !== false ? "checked" : ""}>
           <label for="s-notify">Email the address above when a booking comes in.</label>
+        </div>
+        <div class="confirm-box">
+          <input type="checkbox" id="s-remind" ${s.notifyReminders !== false ? "checked" : ""}>
+          <label for="s-remind">Email the same address a reminder 48 hours before each appointment.</label>
         </div>
       </fieldset>
 
@@ -558,6 +577,7 @@ function readSettingsForm() {
     allowFullPayment: $("#s-fullpay", state.root).checked,
     holdHours: Number(val("#s-hold")),
     notifyNewBookings: $("#s-notify", state.root).checked,
+    notifyReminders: $("#s-remind", state.root).checked,
     bank: { name: val("#s-bank"), accountNumber: val("#s-acct"), accountName: val("#s-acctname") },
     policy: val("#s-policy"),
     hours,

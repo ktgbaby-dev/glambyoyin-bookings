@@ -3,6 +3,7 @@
 import { BlobPreconditionFailedError } from "@vercel/blob";
 import { requireOwner } from "./_lib/auth.js";
 import { releaseSlot, reserveSlot } from "./_lib/bookings.js";
+import { cancelReminderForDelete, syncReminder } from "./_lib/reminders.js";
 import { HttpError, ID_RE, handle, json, readJsonBody, requireSameOrigin } from "./_lib/http.js";
 import { loadSettings, saveSettings } from "./_lib/settings.js";
 import { listAll, mapLimit, readJson, remove, writeJson } from "./_lib/store.js";
@@ -26,7 +27,7 @@ function needId(body) {
   return body.id;
 }
 
-async function changeStatus(body) {
+async function changeStatus(body, origin) {
   const id = needId(body);
   const next = String(body.status || "");
   const file = await readJson(`bookings/${id}.json`);
@@ -66,12 +67,15 @@ async function changeStatus(body) {
     throw err;
   }
   if (RELEASES_SLOT.has(next)) await releaseSlot(booking.date, id);
-  return updated;
+  // confirmed: schedule the reminder; rejected or no-show: cancel it
+  await syncReminder(id, { origin });
+  return (await readJson(`bookings/${id}.json`))?.data ?? updated;
 }
 
 async function deleteBooking(body) {
   const id = needId(body);
   const file = await readJson(`bookings/${id}.json`);
+  if (file) await cancelReminderForDelete(file.data); // a deleted booking must not be reminded about
   if (file) await releaseSlot(file.data.date, id);
   await remove(`proofs/${id}`);
   await remove(`bookings/${id}.json`);
@@ -92,7 +96,7 @@ export function POST(request) {
     const body = await readJsonBody(request, 60_000);
     switch (body.action) {
       case "status":
-        return json({ booking: await changeStatus(body) });
+        return json({ booking: await changeStatus(body, `https://${request.headers.get("x-forwarded-host") || request.headers.get("host") || new URL(request.url).host}`) });
       case "delete":
         await deleteBooking(body);
         return json({ deleted: true });

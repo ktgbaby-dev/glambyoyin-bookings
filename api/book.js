@@ -5,6 +5,7 @@ import { clientView, newCode, newId, releaseSlot, reserveSlot, validateBooking }
 import { handle, json, readJsonBody, requireSameOrigin } from "./_lib/http.js";
 import { notifyNewBooking } from "./_lib/notify.js";
 import { rateLimit } from "./_lib/ratelimit.js";
+import { syncReminder } from "./_lib/reminders.js";
 import { loadSettings } from "./_lib/settings.js";
 import { remove, writeFile, writeJson } from "./_lib/store.js";
 
@@ -48,6 +49,7 @@ export function POST(request) {
     // Tell the studio. Never throws and never delays long: the booking is already safe.
     const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || new URL(request.url).host;
     await notifyNewBooking({ booking, settings, origin: `https://${host}` });
+    await syncReminder(id, { settings, origin: `https://${host}` }); // schedules the 48 hour reminder when the booking qualifies
 
     return json({ booking: clientView(booking) });
   });
