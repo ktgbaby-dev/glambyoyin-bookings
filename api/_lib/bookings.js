@@ -2,7 +2,7 @@
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { HttpError, sleep } from "./http.js";
 import { readJson, writeJson } from "./store.js";
-import { depositFor } from "./settings.js";
+import { canPayInFull, depositFor } from "./settings.js";
 import {
   TIME_RE, dateInTz, daysBetween, isValidDate, toMins, weekdayKey, zonedToEpoch,
 } from "./time.js";
@@ -58,6 +58,13 @@ export function cleanReceipt(receipt) {
   return { type, buffer };
 }
 
+// How the client will pay: the deposit (the default), or the whole price when the studio offers that.
+function cleanPayment(value, settings) {
+  if (value == null || value === "" || value === "deposit") return "deposit";
+  if (value === "full" && canPayInFull(settings)) return "full";
+  throw bad("That payment option isn't available. Please choose again.", "payment");
+}
+
 // Validates a booking request against current settings and returns the
 // record fields. Price and deposit always come from the server's settings.
 export function validateBooking(input, settings, nowMs) {
@@ -110,7 +117,9 @@ export function validateBooking(input, settings, nowMs) {
   const note = cleanText(input.note ?? "", { max: 300, label: "your note", field: "note" });
   const receipt = cleanReceipt(input.receipt);
 
-  const deposit = depositFor(item.price, settings.depositPct);
+  // `deposit` is what the client pays now: the deposit, or the whole price when they pay in full.
+  const payment = cleanPayment(input.payment, settings);
+  const deposit = payment === "full" ? item.price : depositFor(item.price, settings.depositPct);
   return {
     receipt,
     fields: {
@@ -120,7 +129,8 @@ export function validateBooking(input, settings, nowMs) {
       ...lookFields,
       mins: item.mins,
       price: item.price,
-      depositPct: settings.depositPct,
+      payment,
+      depositPct: payment === "full" ? 100 : settings.depositPct,
       deposit,
       balance: item.price - deposit,
       date,
@@ -195,6 +205,7 @@ export function clientView(b) {
     category: b.category,
     mins: b.mins,
     price: b.price,
+    payment: b.payment ?? "deposit",
     deposit: b.deposit,
     balance: b.balance,
     date: b.date,

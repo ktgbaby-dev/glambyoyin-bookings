@@ -133,7 +133,7 @@ export async function api(path, { method = "GET", body } = {}) {
 export const STATUS = {
   pending: { label: "Awaiting confirmation", pill: "pill-pending" },
   confirmed: { label: "Confirmed", pill: "pill-confirmed" },
-  rejected: { label: "Deposit not received", pill: "pill-rejected" },
+  rejected: { label: "Payment not received", pill: "pill-rejected" },
   done: { label: "Completed", pill: "pill-done" },
   noshow: { label: "Missed", pill: "pill-noshow" },
 };

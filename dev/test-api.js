@@ -639,3 +639,81 @@ test("the owner can switch to 24/7 and clients can then book at any hour, any da
   const past = await bookAt(monday, "23:30", { serviceId: "lash-refill" });
   assert.equal(past.status, 400);
 });
+
+// ---------- paying in full ----------
+
+test("a client can pay in full: they pay the whole price now, with nothing left to pay at the studio", () => {
+  const f = priced({ lookId: "traditional", payment: "full" });
+  assert.equal(f.payment, "full");
+  assert.equal(f.price, 80000);
+  assert.equal(f.deposit, 80000); // what they pay now
+  assert.equal(f.balance, 0);
+  assert.equal(f.depositPct, 100);
+  // the same booking with a deposit
+  const d = priced({ lookId: "traditional", payment: "deposit" });
+  assert.deepEqual([d.payment, d.deposit, d.balance, d.depositPct], ["deposit", 40000, 40000, 50]);
+  // no payment given means the deposit, as before
+  const none = priced({ lookId: "traditional" });
+  assert.deepEqual([none.payment, none.deposit, none.balance], ["deposit", 40000, 40000]);
+  // works with a quantity and a plain service too
+  assert.equal(priced({ lookId: "aso-ebi", qty: 3, payment: "full" }).deposit, 75000);
+  const soft = validateBooking({ ...base(), date: "2026-10-28", time: "10:00", payment: "full" }, DEFAULT_SETTINGS, LOOK_NOW).fields;
+  assert.deepEqual([soft.price, soft.deposit, soft.balance], [25000, 25000, 0]);
+});
+
+test("paying in full is refused when it isn't offered, and unknown options are refused", () => {
+  const refused = (settings, payment) => assert.throws(
+    () => validateBooking(base({ date: "2026-10-28", time: "10:00", payment }), settings, LOOK_NOW),
+    (e) => e.status === 400 && e.field === "payment",
+    JSON.stringify({ payment, pct: settings.depositPct, allow: settings.allowFullPayment }),
+  );
+  refused({ ...DEFAULT_SETTINGS, allowFullPayment: false }, "full"); // switched off by the owner
+  refused({ ...DEFAULT_SETTINGS, depositPct: 0 }, "full"); // nothing to pay up front anyway
+  refused({ ...DEFAULT_SETTINGS, depositPct: 100 }, "full"); // the deposit already is the whole price
+  refused(DEFAULT_SETTINGS, "everything");
+  refused(DEFAULT_SETTINGS, 100);
+  // asking for the deposit is always fine
+  const dep = validateBooking(base({ date: "2026-10-28", time: "10:00", payment: "deposit" }), { ...DEFAULT_SETTINGS, allowFullPayment: false }, LOOK_NOW).fields;
+  assert.equal(dep.payment, "deposit");
+});
+
+test("a full-payment booking is stored and shown to the client and the owner with the right amounts", async () => {
+  const cookie = await ownerCookie();
+  const { date, open } = await bookable(1);
+  const r = await bookAt(date, open, { serviceId: "soft-glam", payment: "full" });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  const b = r.data.booking;
+  assert.deepEqual([b.payment, b.price, b.deposit, b.balance], ["full", 25000, 25000, 0]);
+  const st = await call(status.GET, { path: `/api/status?id=${b.id}&code=${b.code}` });
+  assert.deepEqual([st.data.booking.payment, st.data.booking.deposit, st.data.booking.balance], ["full", 25000, 0]);
+  const stored = (await call(owner.GET, { path: "/api/owner", cookie })).data.bookings.find((x) => x.id === b.id);
+  assert.deepEqual([stored.payment, stored.deposit, stored.balance, stored.depositPct], ["full", 25000, 0, 100]);
+  // ordinary bookings still say deposit, and older records without the field read as deposit
+  const d = (await bookAt(date, time.fromMins(time.toMins(open) + 120), { serviceId: "lash-refill" })).data.booking; // after the first one, whatever day it is
+  assert.equal(d.payment, "deposit");
+  const { clientView } = await import("../api/_lib/bookings.js");
+  assert.equal(clientView({ id: "x", code: "ABC234", status: "pending", price: 1, deposit: 1, balance: 0 }).payment, "deposit");
+});
+
+test("the owner can switch full payment off and clients are then refused it", async () => {
+  const cookie = await ownerCookie();
+  const current = (await call(owner.GET, { path: "/api/owner", cookie })).data.settings;
+  assert.equal(current.allowFullPayment, true); // on by default
+  assert.equal((await call(pub.GET)).data.settings.allowFullPayment, true);
+
+  const off = await ownerPost(cookie, { action: "settings", settings: { ...current, allowFullPayment: false } });
+  assert.equal(off.status, 200);
+  assert.equal((await call(pub.GET)).data.settings.allowFullPayment, false);
+  const { date, open } = await bookable(1);
+  const refused = await bookAt(date, open, { serviceId: "soft-glam", payment: "full" });
+  assert.equal(refused.status, 400);
+  assert.equal(refused.data.field, "payment");
+
+  // settings saved before this existed have no such key: they count as on
+  const legacy = { ...current };
+  delete legacy.allowFullPayment;
+  const back = await ownerPost(cookie, { action: "settings", settings: legacy });
+  assert.equal(back.status, 200);
+  assert.equal((await call(pub.GET)).data.settings.allowFullPayment, true);
+  assert.equal((await bookAt(date, open, { serviceId: "soft-glam", payment: "full" })).status, 200);
+});

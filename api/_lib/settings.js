@@ -18,6 +18,7 @@ export const DEFAULT_SETTINGS = {
   email: "oyindamolaobaseki91@gmail.com",
   instagram: "https://www.instagram.com/glambyoyin_/",
   depositPct: 50,
+  allowFullPayment: true, // clients may pay the whole price up front instead of the deposit
   bank: { name: "Ecobank", accountNumber: "0250147305", accountName: "Obaseki Oyindamola" },
   policy:
     "Your deposit holds your slot and comes off your total on the day; the balance is paid at the studio. " +
@@ -242,6 +243,7 @@ export function cleanSettings(input) {
     email,
     instagram,
     depositPct,
+    allowFullPayment: input.allowFullPayment !== false,
     bank: {
       name: text(input.bank?.name, 60, { required: true, label: "Bank name" }),
       accountNumber: digits(input.bank?.accountNumber, 6, 20, "Account number"),
@@ -280,6 +282,9 @@ export function publicSettings(s) {
   const { confirmed, updatedAt, ...rest } = s;
   return rest;
 }
+
+// Paying in full is only a real choice when the deposit is neither nothing nor everything.
+export const canPayInFull = (s) => s.allowFullPayment !== false && s.depositPct > 0 && s.depositPct < 100;
 
 export function depositFor(price, pct) {
   return Math.round((price * pct) / 100);

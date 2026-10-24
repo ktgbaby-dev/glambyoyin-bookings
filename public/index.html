@@ -140,8 +140,12 @@
 
           <form class="step-panel" id="step-3" hidden novalidate>
             <h3 class="step-title">Hold your slot</h3>
+            <div class="pay-options" id="pay-options" hidden>
+              <h4 class="label subhead" id="pay-label">How would you like to pay?</h4>
+              <div class="looks" id="pay-grid" role="group" aria-labelledby="pay-label"></div>
+            </div>
             <div class="deposit-box">
-              <span class="label">Deposit to pay now</span>
+              <span class="label" id="deposit-label">Deposit to pay now</span>
               <p class="deposit-amount" id="deposit-amount"></p>
               <p class="deposit-sub" id="deposit-sub"></p>
             </div>

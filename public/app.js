@@ -21,6 +21,7 @@ const state = {
   skew: 0,
   category: "all",
   service: null,
+  payment: "deposit", // or "full": what the client pays now
   lookId: null, // for services booked by look (Bridal Glam)
   qty: 1, // people, for per-person looks
   date: null,
@@ -42,6 +43,8 @@ const store = {
 };
 
 const depositFor = (price, pct) => Math.round((price * pct) / 100);
+// Paying in full is only a real choice when the deposit is neither nothing nor everything.
+const canPayInFull = (s) => s.allowFullPayment !== false && s.depositPct > 0 && s.depositPct < 100;
 const waLink = (text) => `https://wa.me/${state.settings.whatsapp}${text ? `?text=${encodeURIComponent(text)}` : ""}`;
 const cityOf = (tz) => (tz.split("/").pop() || tz).replace(/_/g, " ");
 
@@ -171,6 +174,7 @@ function startBooking(serviceId) {
   state.service = service;
   state.lookId = null;
   state.qty = 1;
+  state.payment = "deposit";
   state.date = null;
   state.time = null;
   clearReceipt();
@@ -430,10 +434,27 @@ function renderStep3() {
   const svc = order();
   const deposit = depositFor(svc.price, s.depositPct);
   const free = deposit === 0;
-  $("#deposit-amount").textContent = naira(deposit);
+  const choice = !free && canPayInFull(s);
+  if (!choice) state.payment = "deposit";
+  const full = state.payment === "full";
+  const payNow = full ? svc.price : deposit;
+  $("#pay-options").hidden = !choice;
+  if (choice) {
+    $("#pay-grid").innerHTML = [
+      ["deposit", "Pay a deposit", deposit, `${s.depositPct}% now, ${naira(svc.price - deposit)} at the studio`],
+      ["full", "Pay in full", svc.price, "Nothing more to pay at the studio"],
+    ]
+      .map(([id, name, amt, note]) => `<button type="button" class="look" data-pay="${id}" aria-pressed="${state.payment === id}">
+        <span class="look-name">${name}</span><span class="look-price">${naira(amt)}</span><span class="look-meta">${esc(note)}</span></button>`)
+      .join("");
+  }
+  $("#deposit-label").textContent = full ? "Total to pay now" : "Deposit to pay now";
+  $("#deposit-amount").textContent = naira(payNow);
   $("#deposit-sub").textContent = free
     ? `No deposit needed. Your slot is held when you book, and the full ${naira(svc.price)} is paid at the studio.`
-    : `${s.depositPct}% of ${naira(svc.price)} for ${svc.title}, ${fmtDate(state.date)} at ${fmtTime(state.time)}. The remaining ${naira(svc.price - deposit)} is paid at the studio.`;
+    : full
+      ? `The full ${naira(svc.price)} for ${svc.title}, ${fmtDate(state.date)} at ${fmtTime(state.time)}. Nothing more to pay at the studio.`
+      : `${s.depositPct}% of ${naira(svc.price)} for ${svc.title}, ${fmtDate(state.date)} at ${fmtTime(state.time)}. The remaining ${naira(svc.price - deposit)} is paid at the studio.`;
   $("#bank-card").hidden = free;
   $('[data-field="payer"]').hidden = free;
   $('[data-field="receipt"]').hidden = free;
@@ -567,6 +588,7 @@ async function submitBooking(e) {
     name,
     phone: $("#f-phone").value.trim(),
     note: $("#f-note").value.trim(),
+    ...(state.payment === "full" && !free ? { payment: "full" } : {}),
     payer: free ? name : payer,
     receipt: !free && state.receipt ? { type: state.receipt.type, data: state.receipt.data } : null,
   };
@@ -609,6 +631,16 @@ async function handleBookError(err) {
       showTimesMessage(err.message);
       return;
     }
+    if (err.field === "payment") {
+      await loadPublic().catch(() => {});
+      state.payment = "deposit";
+      goStep(3);
+      renderStep3();
+      const box = $("#form-error");
+      box.textContent = err.message;
+      box.hidden = false;
+      return;
+    }
     if (err.field === "look") {
       // The studio changed this service's looks while the client was booking.
       await loadPublic().catch(() => {});
@@ -644,20 +676,22 @@ function remember(booking) {
   store.write(LS_BOOKINGS, list.slice(0, 20));
 }
 
-const TICKET_COPY = {
-  pending: ["Your slot is held", "We'll confirm once your deposit clears. Keep your booking code safe."],
-  confirmed: ["You're confirmed", "Your deposit is confirmed. See you in the chair."],
-  rejected: ["We didn't receive your deposit", "Your slot has been released. Message us on WhatsApp if you think this is a mistake."],
+// "deposit" or "payment", whichever the client chose to pay.
+const payWord = (b) => (b.payment === "full" ? "payment" : "deposit");
+const ticketCopy = (b) => ({
+  pending: ["Your slot is held", `We'll confirm once your ${payWord(b)} clears. Keep your booking code safe.`],
+  confirmed: ["You're confirmed", `Your ${payWord(b)} is confirmed. See you in the chair.`],
+  rejected: [`We didn't receive your ${payWord(b)}`, "Your slot has been released. Message us on WhatsApp if you think this is a mistake."],
   done: ["Thank you for coming", "We hope you loved your look."],
   noshow: ["We missed you", "Your slot has been released. Message us on WhatsApp to book again."],
-};
+})[b.status] || null;
 
 // quiet: refresh the ticket in place (a status poll) without scrolling or moving focus.
 function showTicket(b, { fresh = false, quiet = false } = {}) {
   state.shown = b.id;
-  const [title, note] = TICKET_COPY[b.status] || TICKET_COPY.pending;
+  const [title, note] = ticketCopy(b) || ticketCopy({ ...b, status: "pending" });
   const what = bookingTitle(b);
-  const msg = `Hi, I've just booked ${what}${b.lookName ? ` (total ${naira(b.price)})` : ""} for ${fmtDate(b.date)} at ${fmtTime(b.time)}. My booking code is ${b.code}. Here is my deposit receipt.`;
+  const msg = `Hi, I've just booked ${what}${b.lookName ? ` (total ${naira(b.price)})` : ""} for ${fmtDate(b.date)} at ${fmtTime(b.time)}. My booking code is ${b.code}. Here is my ${payWord(b)} receipt.`;
   const needsReceipt = b.status === "pending" && !b.hasReceipt && b.deposit > 0;
   $("#ticket-view").innerHTML = `
     <div class="ticket-wrap">
@@ -673,8 +707,11 @@ function showTicket(b, { fresh = false, quiet = false } = {}) {
             <dt>Date</dt><dd>${esc(fmtDate(b.date))}</dd>
             <dt>Time</dt><dd>${esc(fmtTime(b.time))}</dd>
             ${b.lookName ? `<dt>Total</dt><dd>${naira(b.price)}${b.qty > 1 ? ` (${b.qty} × ${naira(b.unitPrice)})` : ""}</dd>` : ""}
-            <dt>Deposit</dt><dd>${naira(b.deposit)}</dd>
-            <dt>Balance</dt><dd>${naira(b.balance)} at the studio</dd>
+            ${b.payment === "full"
+              ? `<dt>Payment</dt><dd>${naira(b.deposit)} in full</dd>
+            <dt>Balance</dt><dd>Nothing to pay at the studio</dd>`
+              : `<dt>Deposit</dt><dd>${naira(b.deposit)}</dd>
+            <dt>Balance</dt><dd>${naira(b.balance)} at the studio</dd>`}
             <dt>Name</dt><dd>${esc(b.name)}</dd>
           </dl>
         </div>
@@ -750,6 +787,13 @@ function wire() {
   $("#services-list").addEventListener("click", (e) => {
     const b = e.target.closest("[data-service]");
     if (b) startBooking(b.dataset.service);
+  });
+  $("#pay-grid").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-pay]");
+    if (!b || b.dataset.pay === state.payment) return;
+    state.payment = b.dataset.pay;
+    renderStep3();
+    $(`[data-pay="${b.dataset.pay}"]`)?.focus();
   });
   $("#look-picker").addEventListener("click", (e) => {
     const card = e.target.closest("[data-look]");

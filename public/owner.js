@@ -57,7 +57,7 @@ function renderSignIn(message = "") {
     <div class="signin">
       <span class="eyebrow">Studio owner</span>
       <h1>Bookings desk</h1>
-      <p>Sign in to see bookings and confirm deposits.</p>
+      <p>Sign in to see bookings and confirm payments.</p>
       <form id="signin" novalidate>
         <div class="field">
           <label for="owner-pw">Password</label>
@@ -186,9 +186,9 @@ function bookingsHtml() {
 
   return `
     <div class="stats">
-      <div class="stat ${s.toCheck ? "is-alert" : ""}"><span class="label">Deposits to check</span><span class="n">${s.toCheck}</span></div>
+      <div class="stat ${s.toCheck ? "is-alert" : ""}"><span class="label">Payments to check</span><span class="n">${s.toCheck}</span></div>
       <div class="stat"><span class="label">Confirmed upcoming</span><span class="n">${s.upcoming}</span></div>
-      <div class="stat"><span class="label">Deposits confirmed</span><span class="n">${naira(s.confirmedDeposits)}</span></div>
+      <div class="stat"><span class="label">Payments confirmed</span><span class="n">${naira(s.confirmedDeposits)}</span></div>
       <div class="stat"><span class="label">Balance to collect</span><span class="n">${naira(s.balance)}</span></div>
     </div>
     <div class="chips" role="group" aria-label="Filter bookings">
@@ -204,7 +204,7 @@ function cardHtml(b) {
     ? `<button type="button" class="btn btn-outline" data-action="proof" data-id="${esc(b.id)}">View receipt</button>`
     : "";
   const primary = {
-    pending: `<button type="button" class="btn btn-primary" data-action="status" data-status="confirmed" data-id="${esc(b.id)}">Confirm deposit</button>
+    pending: `<button type="button" class="btn btn-primary" data-action="status" data-status="confirmed" data-id="${esc(b.id)}">${b.payment === "full" ? "Confirm payment" : "Confirm deposit"}</button>
               <button type="button" class="btn btn-outline" data-action="status" data-status="rejected" data-id="${esc(b.id)}">Not received</button>`,
     confirmed: `<button type="button" class="btn btn-primary" data-action="status" data-status="done" data-id="${esc(b.id)}">Mark completed</button>
                 <button type="button" class="btn btn-outline" data-action="status" data-status="noshow" data-id="${esc(b.id)}">No-show</button>`,
@@ -222,7 +222,9 @@ function cardHtml(b) {
       <dl>
         <dt>Client</dt><dd>${esc(b.name)}</dd>
         <dt>WhatsApp</dt><dd>${wa}</dd>
-        <dt>Deposit</dt><dd>${naira(b.deposit)} of ${naira(b.price)}</dd>
+        ${b.payment === "full"
+          ? `<dt>Payment</dt><dd>${naira(b.deposit)} in full</dd>`
+          : `<dt>Deposit</dt><dd>${naira(b.deposit)} of ${naira(b.price)}</dd>`}
         <dt>Paid by</dt><dd>${esc(b.payer)}</dd>
         <dt>Code</dt><dd class="code">${esc(b.code)}</dd>
         <dt>Receipt</dt><dd>${b.hasReceipt ? "Uploaded" : "Not uploaded"}</dd>
@@ -248,7 +250,7 @@ function restoreProofs() {
 function showProof(card, id) {
   const box = $("[data-proof]", card);
   const b = state.bookings.find((x) => x.id === id);
-  box.innerHTML = `<img src="/api/proof?id=${encodeURIComponent(id)}" alt="Deposit receipt from ${esc(b?.payer || "client")}">`;
+  box.innerHTML = `<img src="/api/proof?id=${encodeURIComponent(id)}" alt="Payment receipt from ${esc(b?.payer || "client")}">`;
   $("img", box).addEventListener("error", () => { box.innerHTML = `<p class="empty">The receipt couldn't be loaded.</p>`; });
   box.hidden = false;
 }
@@ -350,6 +352,10 @@ function settingsHtml() {
         <legend>Deposit and bank details</legend>
         <div class="field"><label for="s-deposit">Deposit (% of the price)</label>
           <input type="number" id="s-deposit" min="0" max="100" step="1" inputmode="numeric" value="${esc(s.depositPct)}"></div>
+        <div class="confirm-box">
+          <input type="checkbox" id="s-fullpay" ${s.allowFullPayment !== false ? "checked" : ""}>
+          <label for="s-fullpay">Let clients choose to pay the full price now instead of the deposit. (Shown only when the deposit is between 1% and 99%.)</label>
+        </div>
         <div class="grid2">
           ${field("s-bank", "Bank", s.bank.name, 'maxlength="60"')}
           ${field("s-acct", "Account number", s.bank.accountNumber, 'inputmode="numeric" maxlength="20"')}
@@ -507,6 +513,7 @@ function readSettingsForm() {
     email: val("#s-email"),
     instagram: val("#s-instagram"),
     depositPct: Number(val("#s-deposit")),
+    allowFullPayment: $("#s-fullpay", state.root).checked,
     bank: { name: val("#s-bank"), accountNumber: val("#s-acct"), accountName: val("#s-acctname") },
     policy: val("#s-policy"),
     hours,
