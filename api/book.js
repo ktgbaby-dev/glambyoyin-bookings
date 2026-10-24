@@ -3,6 +3,7 @@
 // booking and receipt written a moment earlier are removed again.
 import { clientView, newCode, newId, releaseSlot, reserveSlot, validateBooking } from "./_lib/bookings.js";
 import { handle, json, readJsonBody, requireSameOrigin } from "./_lib/http.js";
+import { notifyNewBooking } from "./_lib/notify.js";
 import { rateLimit } from "./_lib/ratelimit.js";
 import { loadSettings } from "./_lib/settings.js";
 import { remove, writeFile, writeJson } from "./_lib/store.js";
@@ -43,6 +44,10 @@ export function POST(request) {
       ]);
       throw err;
     }
+
+    // Tell the studio. Never throws and never delays long: the booking is already safe.
+    const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || new URL(request.url).host;
+    await notifyNewBooking({ booking, settings, origin: `https://${host}` });
 
     return json({ booking: clientView(booking) });
   });

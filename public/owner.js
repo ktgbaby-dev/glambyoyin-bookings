@@ -381,6 +381,10 @@ function settingsHtml() {
           ${field("s-email", "Email", s.email, 'inputmode="email" maxlength="120"')}
         </div>
         ${field("s-instagram", "Instagram link", s.instagram, 'maxlength="200"')}
+        <div class="confirm-box">
+          <input type="checkbox" id="s-notify" ${s.notifyNewBookings !== false ? "checked" : ""}>
+          <label for="s-notify">Email the address above when a booking comes in.</label>
+        </div>
       </fieldset>
 
       <fieldset>
@@ -553,6 +557,7 @@ function readSettingsForm() {
     depositPct: Number(val("#s-deposit")),
     allowFullPayment: $("#s-fullpay", state.root).checked,
     holdHours: Number(val("#s-hold")),
+    notifyNewBookings: $("#s-notify", state.root).checked,
     bank: { name: val("#s-bank"), accountNumber: val("#s-acct"), accountName: val("#s-acctname") },
     policy: val("#s-policy"),
     hours,
