@@ -6,9 +6,12 @@
 //     add              { name, username, password, role?, mustChange? }   (admin)
 //     reset            { id, password, mustChange? }   (admin) the login must choose its own password again
 //     remove           { id }                  (admin) not yourself
+//     backup-now       {}                      (admin) copies everything to the backup store right now
 //     setup            { users: [...] }        (the single shared password only) creates the first logins
+//   GET ?download=backup -> a file: the studio's records (admin). Settings, bookings and days; no logins, no receipts.
 import { requireOwner, sessionCookie } from "./_lib/auth.js";
-import { HttpError, handle, json, readJsonBody, requireSameOrigin, sleep } from "./_lib/http.js";
+import { backupStatus, exportStudioData, plainError, runBackup } from "./_lib/backup.js";
+import { HttpError, handle, json, query, readJsonBody, requireSameOrigin, sleep } from "./_lib/http.js";
 import {
   MAX_USERS, buildUser, checkNewPassword, hashPassword, loadUsers, publicUser, saveUsers, updateUsers, verifyPassword,
 } from "./_lib/users.js";
@@ -26,11 +29,24 @@ const needUserId = (body) => {
 export function GET(request) {
   return handle(request, ["GET"], async () => {
     const me = await requireOwner(request, { allowMustChange: true });
+    if (query(request).get("download") === "backup") {
+      if (me.role !== "admin" || me.mustChange) throw forbidden();
+      const file = await exportStudioData();
+      return new Response(JSON.stringify(file), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Content-Disposition": `attachment; filename="glam-by-oyin-records-${file.takenAt.slice(0, 10)}.json"`,
+          "Cache-Control": "no-store",
+        },
+      });
+    }
     const list = await loadUsers();
+    const admin = !!list && me.role === "admin";
     return json({
       me: publicUser(me),
       accounts: !!list,
-      ...(list && me.role === "admin" ? { users: list.users.map(publicUser) } : {}),
+      ...(admin ? { users: list.users.map(publicUser), backup: await backupStatus(), now: Date.now() } : {}),
     });
   });
 }
@@ -118,6 +134,13 @@ export function POST(request) {
           users.splice(i, 1);
         });
         return json({ removed: true });
+      }
+
+      case "backup-now": {
+        if (me.legacy) throw needAccounts();
+        if (me.role !== "admin" || me.mustChange) throw forbidden();
+        const result = await runBackup({ by: "desk" });
+        return json({ result: result.ok ? { ...result } : { ok: false, reason: result.reason, message: plainError(result.message) }, backup: await backupStatus(), now: Date.now() });
       }
 
       case "setup": {

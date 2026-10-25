@@ -7,7 +7,7 @@ Live at https://glambyoyin-bookings.vercel.app. The brand site is a separate pro
 ## How it is built
 
 - `public/` is a static site: `index.html`, `app.js` (client page), `owner.js` (the desk, loaded at `/#owner`), `lib.js`, and `css/style.css`. No framework and no build step.
-- `api/` holds the Node serverless functions Vercel runs: `public`, `book`, `status`, `auth`, `account`, `owner` and `proof`, plus `cron/reminders` (the daily job). Shared code is in `api/_lib/`.
+- `api/` holds the Node serverless functions Vercel runs: `public`, `book`, `status`, `auth`, `account`, `owner` and `proof`, plus `cron/reminders` (the daily job: reminders, then the backup) and `cron/backup` (the backup on demand). Shared code is in `api/_lib/`.
 - Data lives in one **private Vercel Blob store**. There is no database.
 
 | Path in the store | What it holds |
@@ -18,6 +18,7 @@ Live at https://glambyoyin-bookings.vercel.app. The brand site is a separate pro
 | `proofs/<id>` | The receipt image for a booking |
 | `users.json` | The logins, with salted password hashes |
 | `rl/...` | Rate limit counters, keyed by a hash of the visitor's address |
+| `backup/status.json` | The result of the last backup, shown on the desk |
 
 Double bookings are prevented by writing each day's file only if nobody changed it since it was read (a version tag check), with a few retries. Prices, deposits and totals are always worked out on the server.
 
@@ -30,7 +31,8 @@ Set these on the Vercel project (Settings, Environment Variables). See `.env.exa
 | `BLOB_READ_WRITE_TOKEN` | yes | Added automatically when the Blob store is connected to the project |
 | `SESSION_SECRET` | yes | At least 16 random characters. Signs the sign-in cookies. Changing it signs everyone out |
 | `OWNER_PASSWORD` | yes | The **recovery password**. It opens any admin login if a password is forgotten. Keep it somewhere safe |
-| `CRON_SECRET` | yes, for reminders | At least 16 random characters. Vercel sends it to the daily job as `Authorization: Bearer ...`, and the job refuses anything else |
+| `CRON_SECRET` | yes, for reminders and backups | At least 16 random characters. Vercel sends it to the daily job as `Authorization: Bearer ...`, and the job refuses anything else |
+| `BACKUP_BLOB_READ_WRITE_TOKEN` | yes, for backups | The token of the second, separate Blob store the nightly backup is written to |
 | `RESEND_API_KEY` | no | Turns on the emails to the studio: the new-booking alert and the 48 hour reminders |
 | `NOTIFY_EMAIL` | no | Who gets that email, comma separated. Defaults to the studio email in Settings |
 | `NOTIFY_FROM` | no | The sender. Defaults to `GLAM BY OYIN <onboarding@resend.dev>` |
@@ -48,6 +50,32 @@ The studio gets an email 48 hours before each appointment, through the same Rese
 - **Failures:** a temporary failure (no answer, rate limit, server error) is retried after 15 minutes, 1 hour, 3 hours, 12 hours and 24 hours, six tries in all. A refusal that will not change (for example a bad request) is not retried. Everything is logged without the key.
 - **The daily safety net:** `vercel.json` runs `/api/cron/reminders` once a day (06:00 UTC). It schedules reminders that were missed (for example bookings made before the Resend key was added), cancels ones that should not exist, retries cancellations that failed, and records whether each reminder was delivered. On Vercel's Hobby plan a cron job can run only once a day, which is why the sending itself is not done by cron.
 - **Needs:** `RESEND_API_KEY`, and `CRON_SECRET` for the daily job. With Resend's free test sender, mail can only be delivered to the address the Resend account was created with.
+
+## Backups
+
+Every night, in the same daily job as the reminders (06:00 UTC), everything in the main store is copied to a **second, separate private Blob store** (`glambyoyin-bookings-backup`, with its own token).
+
+- **What is copied:** every JSON document (settings, logins, bookings, calendar days) as one snapshot file per night, `snapshots/YYYY-MM-DD.json`, plus each receipt photo once (`proofs/<id>`). Rate-limit counters are not copied. The last **30 nights** are kept. A receipt whose booking was deleted is kept for 30 days and then dropped.
+- **Cheap on quiet nights:** each document's version tag is compared with last night's, so only what changed is read again. State lives in `state.json` in the backup store.
+- **Checked every night:** the snapshot is read straight back and compared before the run counts as good. The result (last run, last good run) is saved in the main store as `backup/status.json` and shown on the desk, **Account** tab (logins that manage logins): the status line, **Back up now**, and **Download a copy** (settings, bookings and days as a file for your own device; no logins, no receipts).
+- **If it fails:** the site carries on untouched, the desk says so, and the studio gets an email ("Backup did not run") when Resend is set up. It tries again the next night.
+- **On demand:** `GET` or `POST /api/cron/backup` with the same `Authorization: Bearer <CRON_SECRET>` runs it now.
+
+### Restoring
+
+Nothing restores by itself. From a computer with the two store tokens (Vercel, Storage, each store, the `.env.local` tab):
+
+```bash
+export BLOB_READ_WRITE_TOKEN=...             # the main store
+export BACKUP_BLOB_READ_WRITE_TOKEN=...      # the backup store
+node dev/restore.mjs list                    # the nights that are kept
+node dev/restore.mjs check latest            # is the newest copy whole? (needs only the backup token)
+node dev/restore.mjs plan latest             # what restoring the newest copy would change; writes nothing
+node dev/restore.mjs apply 2026-10-24 --only bookings/AbC123.json --only days/2026-10-30.json --receipts
+node dev/restore.mjs plan --file glam-by-oyin-records-2026-10-24.json   # from a copy saved with "Download a copy"
+```
+
+`apply` first saves what is live to a `restore-safety-*.json` file, then writes only the documents that are new or different. Documents that exist only in the main store are left alone unless you add `--prune`. `--receipts` copies back receipt photos missing from the main store. A snapshot is taken document by document over a few seconds, so a booking and its day can differ by a moment: restore both (the default) rather than one.
 
 ## Logins and passwords
 
@@ -81,6 +109,6 @@ Pushing to `main` deploys to production automatically. If a push is not picked u
 ## Operating notes
 
 - **Reminders** need Resend (see above). If scheduling a reminder fails more than once and nothing repairs it before the 48 hour mark, that reminder is missed, and the desk shows "Not sent" for it.
-- **Backups:** there are none yet. The Blob store is the only copy of bookings, receipts, settings and logins.
+- **Backups:** see the Backups section. They protect against deleting or overwriting something by mistake and against losing the main store. They do not protect against losing the Vercel account itself, so now and then use **Download a copy** on the desk and keep the file somewhere safe.
 - **Receipts** contain clients' bank details. They are only served to signed-in logins.
 - **Dependencies:** one runtime dependency, `@vercel/blob`. `npm audit` reports a `zod` advisory that arrives through Vercel's own packages and cannot be fixed from here. Do not run `npm audit fix --force`, which would downgrade `@vercel/blob`.

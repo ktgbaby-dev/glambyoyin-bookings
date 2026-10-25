@@ -26,7 +26,17 @@ export class BlobNotFoundError extends BlobError {
   }
 }
 
-const store = new Map(); // pathname -> { buffer, contentType, etag, uploadedAt }
+// One Map per token, so a second ("backup") store is separate from the main one. Calls that pass
+// no token use the main store, which is all the booking code does.
+const stores = new Map(); // token -> Map(pathname -> { buffer, contentType, etag, uploadedAt })
+const storeFor = (opts) => {
+  const token = (opts && opts.token) || "";
+  if (failing.has(token)) throw new BlobError("Simulated outage: this store is not answering.");
+  if (!stores.has(token)) stores.set(token, new Map());
+  return stores.get(token);
+};
+const failing = new Set(); // tokens whose every call throws (tests switch an outage on and off)
+const lossy = new Set(); // tokens whose writes are accepted but quietly not kept
 let version = 0;
 const latency = () => new Promise((r) => setTimeout(r, Math.random() * 8));
 
@@ -56,6 +66,7 @@ export async function put(pathname, body, opts = {}) {
   if (opts.ifMatch && opts.allowOverwrite === false) {
     throw new BlobError("ifMatch cannot be combined with allowOverwrite: false");
   }
+  const store = storeFor(opts);
   const cur = store.get(pathname);
   if (opts.ifMatch) {
     if (!cur || cur.etag !== opts.ifMatch) throw new BlobPreconditionFailedError();
@@ -69,14 +80,14 @@ export async function put(pathname, body, opts = {}) {
     etag: `"v${++version}"`,
     uploadedAt: new Date(),
   };
-  store.set(pathname, v);
+  if (!lossy.has((opts && opts.token) || "")) store.set(pathname, v);
   return describe(pathname, v);
 }
 
 export async function get(pathname, opts = {}) {
   await latency();
   requirePrivate(opts, "get");
-  const v = store.get(pathname);
+  const v = storeFor(opts).get(pathname);
   if (!v) return null;
   return {
     statusCode: 200,
@@ -86,16 +97,18 @@ export async function get(pathname, opts = {}) {
   };
 }
 
-export async function del(target) {
+export async function del(target, opts = {}) {
   await latency();
+  const store = storeFor(opts);
   for (const t of Array.isArray(target) ? target : [target]) {
     const pathname = t.startsWith("https://") ? new URL(t).pathname.slice(1) : t;
     store.delete(pathname);
   }
 }
 
-export async function list({ prefix = "", cursor, limit = 1000 } = {}) {
+export async function list({ prefix = "", cursor, limit = 1000, token } = {}) {
   await latency();
+  const store = storeFor({ token });
   const all = [...store.keys()].filter((p) => p.startsWith(prefix)).sort();
   const start = cursor ? Number(cursor) : 0;
   const page = all.slice(start, start + limit);
@@ -109,6 +122,15 @@ export async function list({ prefix = "", cursor, limit = 1000 } = {}) {
 
 // Test helpers (not part of the real SDK)
 export const __mock = {
-  paths: (prefix = "") => [...store.keys()].filter((p) => p.startsWith(prefix)).sort(),
-  reset: () => store.clear(),
+  paths: (prefix = "", token = "") => [...(stores.get(token) || new Map()).keys()].filter((p) => p.startsWith(prefix)).sort(),
+  text: (pathname, token = "") => stores.get(token)?.get(pathname)?.buffer.toString("utf8") ?? null,
+  // writes straight into a store, bypassing the SDK (used to plant data and to damage it on purpose)
+  plant: (pathname, body, token = "", contentType = "application/json") => {
+    if (!stores.has(token)) stores.set(token, new Map());
+    stores.get(token).set(pathname, { buffer: toBuffer(body), contentType, etag: `"v${++version}"`, uploadedAt: new Date() });
+  },
+  unplant: (pathname, token = "") => stores.get(token)?.delete(pathname),
+  outage: (token, on = true) => (on ? failing.add(token) : failing.delete(token)),
+  lossy: (token, on = true) => (on ? lossy.add(token) : lossy.delete(token)),
+  reset: () => { stores.clear(); failing.clear(); lossy.clear(); },
 };

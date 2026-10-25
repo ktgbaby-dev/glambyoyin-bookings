@@ -329,6 +329,7 @@ async function onClick(e) {
   if (action === "reset-open") return openReset(btn);
   if (action === "remove-login") return removeLogin(btn);
   if (action === "sign-out-others") return signOutOthers(btn);
+  if (action === "backup-now") return backupNow(btn);
   if (action === "add-look") return addLookRow(btn.closest(".svc-edit"));
   if (action === "remove-look") return btn.closest(".look-edit").remove();
 
@@ -723,7 +724,62 @@ function accountHtml() {
         <span class="save-msg" id="others-msg" role="status" aria-live="polite"></span>
       </div>
     </fieldset></div>
+    <div id="backups"></div>
     <div id="logins">${u.role === "admin" ? `<p class="empty">Loading logins…</p>` : ""}</div>`;
+}
+
+const stamp = (iso) =>
+  new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true, timeZone: state.settings?.tz || "Africa/Lagos" })
+    .format(new Date(iso)).replace(/\s?([ap])m/i, (_, a) => ` ${a.toLowerCase()}m`);
+
+function backupLine() {
+  const b = state.backup;
+  if (!b?.configured) return { tone: "err", text: "Backups are not set up yet. Your bookings are not being copied anywhere." };
+  const last = b.last;
+  if (!last) return { tone: "", text: "No backup has run yet. The first one runs tonight, or tap Back up now." };
+  const good = last.lastOkAt ? ` The last good copy is from ${stamp(last.lastOkAt)}.` : " There is no good copy yet.";
+  if (!last.ok) return { tone: "err", text: `The last attempt (${stamp(last.at)}) did not finish: ${last.message}.${good}` };
+  const days = (state.serverNow - Date.parse(last.at)) / 86_400_000;
+  const stale = days > 2 ? ` That was ${Math.floor(days)} days ago, so the nightly copy may have stopped.` : "";
+  const parts = [`${last.bookings} booking${last.bookings === 1 ? "" : "s"}`, `${last.receipts} receipt${last.receipts === 1 ? "" : "s"}`];
+  return { tone: stale ? "err" : "ok", text: `Last backup ${stamp(last.at)}: ${parts.join(" and ")} copied and checked. ${last.snapshotsKept === 1 ? "One night is kept so far." : `The last ${last.snapshotsKept} nights are kept.`}${last.partial ? " Some receipts are still to copy and will finish tonight." : ""}${stale}` };
+}
+
+function backupsHtml() {
+  const { tone, text } = backupLine();
+  return `
+    <div class="settings-form"><fieldset>
+      <legend>Backups</legend>
+      <p class="hint backup-line ${tone}" id="backup-line">${esc(text)}</p>
+      <p class="hint" style="margin-top:8px">Every night a copy of the bookings, settings, logins and receipts goes to a separate store, and the last 30 nights are kept. “Download a copy” saves your bookings and settings to this device (no logins or receipts).</p>
+      <div class="save-bar" style="margin-top:12px">
+        <button type="button" class="btn btn-outline btn-sm" data-action="backup-now">Back up now</button>
+        <a class="btn btn-outline btn-sm" href="/api/account?download=backup" download>Download a copy</a>
+        <span class="save-msg" id="backup-msg" role="status" aria-live="polite"></span>
+      </div>
+    </fieldset></div>`;
+}
+
+async function backupNow(btn) {
+  const msg = $("#backup-msg", state.root);
+  btn.disabled = true;
+  msg.className = "save-msg";
+  msg.textContent = "Backing up…";
+  try {
+    const res = await api("/api/account", { method: "POST", body: { action: "backup-now" } });
+    state.backup = res.backup;
+    state.serverNow = res.now;
+    const box = $("#backups", state.root);
+    if (box) box.innerHTML = backupsHtml();
+    const again = $("#backup-msg", state.root);
+    again.className = `save-msg ${res.result.ok ? "ok" : "err"}`;
+    again.textContent = res.result.ok ? "Done." : res.result.message;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) return renderSignIn("Your session has ended. Please sign in again.");
+    msg.className = "save-msg err";
+    msg.textContent = err.message;
+    btn.disabled = false;
+  }
 }
 
 async function loadLogins() {
@@ -731,6 +787,10 @@ async function loadLogins() {
   try {
     const data = await api("/api/account");
     state.users = data.users || [];
+    state.backup = data.backup;
+    state.serverNow = data.now;
+    const backups = $("#backups", state.root);
+    if (backups) backups.innerHTML = backupsHtml();
     const box = $("#logins", state.root);
     if (box) box.innerHTML = loginsHtml();
   } catch (err) {

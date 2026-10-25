@@ -113,6 +113,25 @@ function layout(heading, intro, rows, deskUrl, settings) {
   return { text, html };
 }
 
+// Tells the studio the nightly backup did not finish. Bookings are not affected, only the copy.
+export async function notifyBackupFailed({ settings, origin, message }) {
+  if (!process.env.RESEND_API_KEY) return { sent: false, reason: "off" };
+  const to = recipients(settings);
+  if (!to.length) return { sent: false, reason: "no recipient" };
+  const rows = [
+    ["What happened", message],
+    ["Your bookings", "Safe where they are. Only the copy was affected."],
+    ["Next", "It tries again tomorrow night. You can also open the desk, go to Account and tap Back up now."],
+  ];
+  const { text, html } = layout("The nightly backup did not run", "The copy of your bookings did not finish.", rows, origin ? `${origin}/#owner` : "", settings);
+  const res = await resend("/emails", { body: { from: senderFor(settings), to, subject: `Backup did not run · ${settings.name}`.slice(0, 200), text, html } });
+  if (!res.ok) {
+    console.error(`Backup alert not sent: ${res.error}`);
+    return { sent: false, reason: res.error };
+  }
+  return { sent: true };
+}
+
 export async function notifyNewBooking({ booking, settings, origin }) {
   if (!process.env.RESEND_API_KEY || settings.notifyNewBookings === false) return { sent: false, reason: "off" };
   const to = recipients(settings);

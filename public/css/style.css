@@ -761,6 +761,8 @@ body.is-owner { background: var(--porcelain); }
 .save-msg { font-size: 0.92rem; }
 .save-msg.ok { color: var(--ok-ink); }
 .save-msg.err { color: var(--berry); }
+.backup-line.ok { color: var(--ok-ink); }
+.backup-line.err { color: var(--berry); }
 
 /* ---------- Wider screens ---------- */
 

@@ -24,6 +24,10 @@
   "regions": [
     "lhr1"
   ],
+  "functions": {
+    "api/cron/*.js": { "maxDuration": 60 },
+    "api/account.js": { "maxDuration": 60 }
+  },
   "crons": [
     { "path": "/api/cron/reminders", "schedule": "0 6 * * *" }
   ]

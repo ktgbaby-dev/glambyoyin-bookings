@@ -1,25 +1,18 @@
-// GET or POST /api/cron/reminders: the daily safety net for appointment reminders (see _lib/reminders.js).
-// Vercel calls it from the cron entry in vercel.json and sends `Authorization: Bearer <CRON_SECRET>`.
-// Anything else, without that header, is refused.
-import { createHash, timingSafeEqual } from "node:crypto";
-import { HttpError, handle, json } from "../_lib/http.js";
+// GET or POST /api/cron/reminders: the daily job. It is the safety net for appointment reminders (see
+// _lib/reminders.js) and it also makes the nightly backup (see _lib/backup.js). Vercel's Hobby plan allows
+// one run a day per entry, so both share this one entry in vercel.json.
+import { handle, json } from "../_lib/http.js";
+import { authorised, nightlyBackup, originOf } from "../_lib/cron.js";
 import { reconcile } from "../_lib/reminders.js";
-
-function authorised(request) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret || secret.length < 16) throw new HttpError(503, "not_configured", "The scheduled job is not set up (CRON_SECRET is missing).");
-  const given = request.headers.get("authorization") || "";
-  const a = createHash("sha256").update(given).digest();
-  const b = createHash("sha256").update(`Bearer ${secret}`).digest();
-  if (!timingSafeEqual(a, b)) throw new HttpError(401, "unauthorized", "Not allowed.");
-}
 
 async function run(request) {
   authorised(request);
-  const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || new URL(request.url).host;
-  const summary = await reconcile({ origin: `https://${host}` });
+  const origin = originOf(request);
+  const summary = await reconcile({ origin });
   console.log(JSON.stringify({ event: "reminders-run", ...summary }));
-  return json(summary);
+  const backup = await nightlyBackup(origin);
+  console.log(JSON.stringify({ event: "backup-run", ...backup }));
+  return json({ ...summary, backup });
 }
 
 export const GET = (request) => handle(request, ["GET"], () => run(request));

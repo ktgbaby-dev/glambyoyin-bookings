@@ -1814,3 +1814,280 @@ test("the default settings switch reminders on, and Settings validates and keeps
   assert.equal(cleanSettings(without).notifyReminders, true); // settings saved before this existed
   assert.equal(cleanSettings({ ...DEFAULT_SETTINGS, notifyReminders: false }).notifyReminders, false);
 });
+
+// ---------- backups ----------
+
+const backupApi = await import("../api/_lib/backup.js");
+const backupCron = await import("../api/cron/backup.js");
+const BT = "backup-store-token-for-tests";
+const DAY = 24 * HOUR;
+const D0 = Date.UTC(2026, 9, 25, 6, 0); // 06:00 UTC, when the daily job runs
+const withBackupStore = async (fn) => {
+  process.env.BACKUP_BLOB_READ_WRITE_TOKEN = BT;
+  try { return await fn(); } finally { delete process.env.BACKUP_BLOB_READ_WRITE_TOKEN; }
+};
+const snapshotOf = (date) => JSON.parse(__mock.text(`snapshots/${date}.json`, BT));
+const dayKey = (ms) => new Date(ms).toISOString().slice(0, 10);
+const mainDocs = () => Object.fromEntries(__mock.paths("").map((p) => [p, __mock.text(p)]));
+// A studio with logins, saved settings, a booking with a receipt and one without. Returns what the tests need.
+async function studioWithBookings() {
+  const logins = await readyLogins();
+  const cookie = logins.ktg.cookie;
+  const current = (await call(owner.GET, { path: "/api/owner", cookie })).data.settings;
+  assert.equal((await ownerPost(cookie, { action: "settings", settings: current })).status, 200);
+  const a = await paidBooking(4);
+  const { date, open } = await bookable(6);
+  const b = (await bookAt(date, open, { name: "No Receipt" })).data.booking;
+  return { logins, cookie, a, b, bDate: date };
+}
+
+test("the first backup copies the settings, logins, every booking and day, and the receipts, to a store of its own", async () => {
+  await withBackupStore(async () => {
+    const { a, b } = await studioWithBookings();
+    __mock.plant("rl/book/2026-10-25T05/abc123", JSON.stringify({ n: 3 })); // counters and old status files exist in a live store
+    __mock.plant("backup/old.json", JSON.stringify({ ok: true }));
+    const mainBefore = Object.keys(mainDocs()).filter((p) => !p.startsWith("backup/"));
+    const r = await backupApi.runBackup({ now: D0 });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(r.verified, true);
+    assert.equal(r.bookings, 2);
+    assert.equal(r.receipts, 1);
+    const names = __mock.paths("", BT);
+    assert.deepEqual(names.filter((p) => !p.startsWith("proofs/")), ["snapshots/2026-10-25.json", "state.json"]);
+    assert.deepEqual(names.filter((p) => p.startsWith("proofs/")), [`proofs/${a.id}`]);
+    const snap = snapshotOf("2026-10-25");
+    for (const p of ["settings.json", "users.json", `bookings/${a.id}.json`, `bookings/${b.id}.json`]) assert.ok(p in snap.docs, p);
+    assert.ok(Object.keys(snap.docs).some((p) => p.startsWith("days/")));
+    assert.ok(!Object.keys(snap.docs).some((p) => /^(rl|backup|proofs)\//.test(p)), "counters, status and receipts are not in the snapshot");
+    assert.equal(snap.docs[`bookings/${a.id}.json`], __mock.text(`bookings/${a.id}.json`), "exact copy of the text");
+    assert.equal(__mock.text(`proofs/${a.id}`, BT), __mock.text(`proofs/${a.id}`), "the receipt is the same bytes");
+    // the main store only gained the status file
+    assert.deepEqual(Object.keys(mainDocs()).filter((p) => !p.startsWith("backup/")), mainBefore);
+    assert.deepEqual(__mock.paths("backup/"), ["backup/old.json", "backup/status.json"], "the run adds only its status file");
+  });
+});
+
+test("a quiet night reads only what changed; a changed booking is picked up and earlier nights are kept", async () => {
+  await withBackupStore(async () => {
+    const { cookie, a } = await studioWithBookings();
+    const first = await backupApi.runBackup({ now: D0 });
+    assert.ok(first.changed >= 5 && first.unchanged === 0, JSON.stringify(first));
+    const quiet = await backupApi.runBackup({ now: D0 + DAY });
+    assert.deepEqual([quiet.ok, quiet.changed, quiet.unchanged, quiet.receiptsCopied], [true, 0, first.documents, 0]);
+    assert.equal((await ownerPost(cookie, { action: "status", id: a.id, status: "confirmed" })).status, 200);
+    const next = await backupApi.runBackup({ now: D0 + 2 * DAY });
+    assert.ok(next.changed >= 1 && next.changed < first.documents, JSON.stringify(next));
+    assert.equal(JSON.parse(snapshotOf("2026-10-27").docs[`bookings/${a.id}.json`]).status, "confirmed");
+    assert.equal(JSON.parse(snapshotOf("2026-10-26").docs[`bookings/${a.id}.json`]).status, "pending", "last night's copy still shows the old state");
+  });
+});
+
+test("a booking deleted from the desk is gone from tonight's copy but stays in earlier ones; its receipt goes after 30 days", async () => {
+  await withBackupStore(async () => {
+    const { cookie, a } = await studioWithBookings();
+    await backupApi.runBackup({ now: D0 });
+    assert.equal((await ownerPost(cookie, { action: "delete", id: a.id })).status, 200);
+    const next = await backupApi.runBackup({ now: D0 + DAY });
+    assert.equal(next.bookings, 1);
+    assert.ok(!(`bookings/${a.id}.json` in snapshotOf("2026-10-26").docs));
+    assert.ok(`bookings/${a.id}.json` in snapshotOf("2026-10-25").docs, "yesterday's copy still has it");
+    assert.ok(__mock.paths("proofs/", BT).includes(`proofs/${a.id}`), "the receipt is kept for now");
+    await backupApi.runBackup({ now: D0 + 10 * DAY });
+    assert.ok(__mock.paths("proofs/", BT).includes(`proofs/${a.id}`), "still kept after 9 days");
+    const later = await backupApi.runBackup({ now: D0 + 32 * DAY });
+    assert.equal(later.receiptsDropped, 1);
+    assert.deepEqual(__mock.paths("proofs/", BT), [], "dropped once it has been gone for more than 30 days");
+  });
+});
+
+test("only the last 30 nights are kept", async () => {
+  await withBackupStore(async () => {
+    await studioWithBookings();
+    for (let i = 0; i < 33; i++) assert.equal((await backupApi.runBackup({ now: D0 + i * DAY })).ok, true);
+    const kept = __mock.paths("snapshots/", BT);
+    assert.equal(kept.length, 30);
+    assert.equal(kept[0], `snapshots/${dayKey(D0 + 3 * DAY)}.json`);
+    assert.equal(kept.at(-1), `snapshots/${dayKey(D0 + 32 * DAY)}.json`);
+  });
+});
+
+test("with no backup store set up nothing is copied, the desk says so, and nothing in the main store changes", async () => {
+  const { cookie } = await studioWithBookings();
+  const before = mainDocs();
+  const r = await backupApi.runBackup({ now: D0 });
+  assert.deepEqual([r.ok, r.reason], [false, "not_configured"]);
+  assert.deepEqual(mainDocs(), before);
+  const page = await acctGet(cookie);
+  assert.deepEqual(page.data.backup, { configured: false, last: null });
+});
+
+test("if the backup store is down: the site carries on, the failure is recorded without any token, the studio is emailed, and the next good run recovers", async () => {
+  assert.equal(backupApi.plainError(new Error("bad token vercel_blob_rw_ABC123_xyz and more")).includes("vercel_blob_rw_"), false);
+  await withBackupStore(async () => withCron(async () => {
+    const { cookie } = await studioWithBookings();
+    const good = await backupApi.runBackup({ now: D0 });
+    assert.equal(good.ok, true);
+    __mock.outage(BT);
+    await withResend(resendOk, async (calls) => {
+      const { result: run, errors } = await quietly(() => call(cronApi.GET, { path: "/api/cron/reminders", headers: { authorization: `Bearer ${CRON_SECRET}` } }));
+      assert.equal(run.status, 200, "the daily job still answers");
+      assert.deepEqual([run.data.backup.ok, run.data.backup.reason], [false, "failed"]);
+      assert.ok(!JSON.stringify(run.data).includes(BT), "the token is never shown");
+      assert.ok(errors.some((e) => e.includes("Backup failed")));
+      const alerts = calls.filter((c) => /^Backup did not run/.test(c.body?.subject || ""));
+      assert.equal(alerts.length, 1, "the studio is told once");
+      assert.ok(!JSON.stringify(alerts[0].body).includes(BT));
+    });
+    // the site itself never noticed
+    const { date, open } = await bookable(9);
+    assert.equal((await bookAt(date, time.fromMins(time.toMins(open) + 120), { name: "During Outage" })).status, 200);
+    const status = (await acctGet(cookie)).data.backup.last;
+    assert.deepEqual([status.ok, status.lastOkAt], [false, new Date(D0).toISOString()], "the last good copy is remembered");
+    __mock.outage(BT, false);
+    const again = await backupApi.runBackup({ now: D0 + DAY });
+    assert.equal(again.ok, true);
+    assert.equal((await acctGet(cookie)).data.backup.last.lastOkAt, new Date(D0 + DAY).toISOString());
+  }));
+});
+
+test("the daily job runs the backup after the reminders; the on-demand route is locked with the same secret", async () => {
+  await withBackupStore(async () => withCron(async () => {
+    await studioWithBookings();
+    const auth = { authorization: `Bearer ${CRON_SECRET}` };
+    const no = await call(cronApi.GET, { path: "/api/cron/reminders" });
+    const wrong = await call(backupCron.GET, { path: "/api/cron/backup", headers: { authorization: "Bearer nope" } });
+    assert.deepEqual([no.status, wrong.status], [401, 401]);
+    assert.deepEqual(__mock.paths("", BT), [], "refused requests copy nothing");
+    const { result: daily } = await quietly(() => call(cronApi.GET, { path: "/api/cron/reminders", headers: auth }));
+    assert.equal(daily.status, 200);
+    assert.equal(daily.data.backup.ok, true);
+    assert.ok("emailConfigured" in daily.data, "the reminders part of the answer is unchanged");
+    const { result: manual } = await quietly(() => call(backupCron.POST, { method: "POST", path: "/api/cron/backup", headers: auth }));
+    assert.equal(manual.status, 200);
+    assert.equal(manual.data.ok, true);
+    assert.equal(manual.data.changed, 0, "the second run the same day found nothing new");
+  }));
+});
+
+test("a copy that cannot be read back is reported as a failure, never as a good backup", async () => {
+  await withBackupStore(async () => {
+    const { cookie } = await studioWithBookings();
+    __mock.lossy(BT); // the store says "saved" but keeps nothing
+    const { result: r } = await quietly(() => backupApi.runBackup({ now: D0 }));
+    assert.deepEqual([r.ok, r.reason], [false, "failed"]);
+    assert.match(r.message, /did not read back the same/);
+    const last = (await acctGet(cookie)).data.backup.last;
+    assert.deepEqual([last.ok, last.lastOkAt], [false, null], "there is no good copy to point at");
+    __mock.lossy(BT, false);
+    assert.equal((await backupApi.runBackup({ now: D0 + DAY })).ok, true);
+  });
+});
+
+test("the desk: only a login that manages logins sees the backup status, can back up now, or download a copy; the copy has no logins or receipts", async () => {
+  await withBackupStore(async () => {
+    const { logins, a } = await studioWithBookings();
+    const admin = logins.ktg.cookie;
+    const member = logins.oyin.cookie;
+    assert.equal((await acctGet(admin)).data.backup.configured, true);
+    assert.equal((await acctGet(member)).data.backup, undefined, "a studio login does not see it");
+    const now = (cookie) => acct(cookie, { action: "backup-now" });
+    assert.equal((await now(member)).status, 403);
+    assert.equal((await call(accountApi.POST, { method: "POST", path: "/api/account", body: { action: "backup-now" } })).status, 401);
+    const done = await now(admin);
+    assert.equal(done.status, 200, JSON.stringify(done.data));
+    assert.equal(done.data.result.ok, true);
+    assert.equal(done.data.backup.last.bookings, 2);
+    assert.equal(__mock.paths("snapshots/", BT).length, 1);
+
+    const dl = (cookie) => call(accountApi.GET, { path: "/api/account?download=backup", cookie });
+    assert.equal((await dl(member)).status, 403);
+    assert.equal((await dl(undefined)).status, 401);
+    const file = await dl(admin);
+    assert.equal(file.status, 200);
+    assert.match(file.headers.get("content-disposition"), /^attachment; filename="glam-by-oyin-records-\d{4}-\d{2}-\d{2}\.json"$/);
+    assert.equal(file.headers.get("cache-control"), "no-store");
+    const names = Object.keys(file.data.docs);
+    assert.ok(names.includes("settings.json") && names.includes(`bookings/${a.id}.json`));
+    assert.ok(!names.some((p) => p === "users.json" || p.startsWith("proofs/") || p.startsWith("rl/")), "no logins, no receipts");
+    assert.ok(!JSON.stringify(file.data).includes("scrypt"), "no password hashes");
+  });
+});
+
+test("restoring: a dry run changes nothing; restoring puts a deleted booking, its day and its receipt back; extras stay unless asked", async () => {
+  await withBackupStore(async () => {
+    const { cookie, a, b } = await studioWithBookings();
+    await backupApi.runBackup({ now: D0 });
+    assert.equal((await ownerPost(cookie, { action: "delete", id: a.id })).status, 200);
+    const slot = await bookable(10);
+    const extra = (await bookAt(slot.date, slot.open, { name: "Made After" })).data.booking;
+    assert.ok(!(`proofs/${a.id}` in mainDocs()));
+
+    const snap = await backupApi.loadSnapshot("latest");
+    const before = mainDocs();
+    const plan = await backupApi.planRestore(snap, { receipts: true });
+    assert.ok(plan.fresh.includes(`bookings/${a.id}.json`));
+    assert.ok([...plan.fresh, ...plan.changed].includes(`days/${a.date}.json`));
+    assert.deepEqual(plan.missingReceipts, [`proofs/${a.id}`]);
+    assert.ok(plan.onlyLive.includes(`bookings/${extra.id}.json`));
+    assert.deepEqual(mainDocs(), before, "planning writes nothing");
+
+    // only one document: the day is not touched
+    const one = await backupApi.planRestore(snap, { only: [`bookings/${a.id}.json`] });
+    assert.deepEqual([one.fresh.length, one.changed.length], [1, 0]);
+    assert.deepEqual(await backupApi.applyRestore(snap, one), { written: 1, receipts: 0, pruned: 0 });
+    assert.ok(`bookings/${a.id}.json` in mainDocs());
+    assert.ok(!(`proofs/${a.id}` in mainDocs()));
+
+    const full = await backupApi.planRestore(snap, { receipts: true });
+    const done = await backupApi.applyRestore(snap, full);
+    assert.equal(done.receipts, 1);
+    assert.equal(done.pruned, 0);
+    const list = (await call(owner.GET, { path: "/api/owner", cookie })).data.bookings.map((x) => x.id);
+    assert.ok(list.includes(a.id) && list.includes(b.id) && list.includes(extra.id), "the extra booking was left alone");
+    const taken = (await call(pub.GET)).data.taken;
+    assert.ok(taken.some((t) => t.date === a.date && t.time === a.time), "the slot is taken again");
+    const img = await call(proof.GET, { path: `/api/proof?id=${a.id}`, cookie });
+    assert.equal(img.status, 200);
+    assert.match(img.headers.get("content-type"), /^image\//);
+
+    // now the extras: --prune removes what the snapshot does not have
+    const again = await backupApi.planRestore(snap);
+    assert.ok(again.onlyLive.includes(`bookings/${extra.id}.json`));
+    const pruned = await backupApi.applyRestore(snap, again, { prune: true });
+    assert.ok(pruned.pruned >= 1);
+    assert.ok(!(`bookings/${extra.id}.json` in mainDocs()));
+    assert.ok(`bookings/${a.id}.json` in mainDocs());
+  });
+});
+
+test("checking a copy: a whole one passes; a missing receipt or a damaged document is named", async () => {
+  await withBackupStore(async () => {
+    const { a } = await studioWithBookings();
+    await backupApi.runBackup({ now: D0 });
+    const whole = await backupApi.checkSnapshot(await backupApi.loadSnapshot("latest"));
+    assert.deepEqual([whole.unreadable, whole.receiptsMissing, whole.receiptsExpected, whole.bookings], [[], [], 1, 2]);
+    __mock.unplant(`proofs/${a.id}`, BT);
+    const snap = await backupApi.loadSnapshot("latest");
+    snap.docs[`bookings/damaged.json`] = "{not json";
+    const bad = await backupApi.checkSnapshot(snap);
+    assert.deepEqual(bad.unreadable, ["bookings/damaged.json"]);
+    assert.deepEqual(bad.receiptsMissing, [`proofs/${a.id}`]);
+  });
+});
+
+test("a downloaded copy can be restored from too, and it leaves the logins alone", async () => {
+  await withBackupStore(async () => {
+    const { logins, cookie, b } = await studioWithBookings();
+    const file = (await call(accountApi.GET, { path: "/api/account?download=backup", cookie: logins.ktg.cookie })).data;
+    assert.equal(file.kind, "export");
+    assert.equal((await ownerPost(cookie, { action: "delete", id: b.id })).status, 200);
+    const usersBefore = __mock.text("users.json");
+    const plan = await backupApi.planRestore(await backupApi.loadSnapshot(file));
+    assert.ok(plan.fresh.includes(`bookings/${b.id}.json`));
+    await backupApi.applyRestore(file, plan);
+    assert.equal(__mock.text("users.json"), usersBefore);
+    assert.ok((await call(owner.GET, { path: "/api/owner", cookie })).data.bookings.some((x) => x.id === b.id));
+    await assert.rejects(() => backupApi.loadSnapshot("yesterday"), /not a date/);
+    await assert.rejects(() => backupApi.loadSnapshot("2020-01-01"), /no snapshot/);
+  });
+});
